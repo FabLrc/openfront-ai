@@ -1,0 +1,38 @@
+import { GameMapType } from "@openfront/engine-api/game/GameTypes";
+import { MapManifest } from "@openfront/engine-api/game/MapFiles";
+import { GameMapLoader, MapData } from "@openfront/shared/GameMapLoader";
+import fs from "fs";
+import path from "path";
+
+/**
+ * Charge les cartes depuis openfront/resources/maps (copie de
+ * openfront/tests/perf/fullgame/NodeGameMapLoader.ts).
+ */
+export class NodeGameMapLoader implements GameMapLoader {
+  constructor(private mapsDir: string) {}
+
+  getMapData(map: GameMapType): MapData {
+    const key = Object.keys(GameMapType).find(
+      (k) => GameMapType[k as keyof typeof GameMapType] === map,
+    );
+    if (key === undefined) {
+      throw new Error(`unknown map: ${map}`);
+    }
+    const dir = path.join(this.mapsDir, key.toLowerCase());
+    const readBin = (name: string) => async () =>
+      new Uint8Array(fs.readFileSync(path.join(dir, name)));
+    return {
+      mapBin: readBin("map.bin"),
+      map4xBin: readBin("map4x.bin"),
+      map16xBin: readBin("map16x.bin"),
+      manifest: async () =>
+        JSON.parse(
+          fs.readFileSync(path.join(dir, "manifest.json"), "utf8"),
+        ) as MapManifest,
+      webpPath: path.join(dir, "thumbnail.webp"),
+      layerImage: async () => {
+        throw new Error("Layer images are not supported in NodeGameMapLoader");
+      },
+    };
+  }
+}
