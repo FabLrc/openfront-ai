@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenFront IA — partie en direct</title>
+<style>
+  :root {
+    --bg: #0f1419; --panel: #171e26; --text: #e6e9ee; --muted: #8a96a3;
+    --line: #2a3440; --accent: #4da3ff; --water: #16324a; --land: #c9c0a8;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.4 system-ui, -apple-system, sans-serif; }
+  header { display: flex; flex-wrap: wrap; gap: 16px; align-items: center;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0 8px 0 0; }
+  .stat { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stat b { color: var(--text); font-weight: 600; }
+  .speed { margin-left: auto; display: flex; gap: 4px; }
+  .speed button { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 4px 12px; cursor: pointer; font: inherit; }
+  .speed button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  main { display: flex; gap: 16px; padding: 16px; align-items: flex-start; }
+  #wrap { flex: 1; min-width: 0; }
+  canvas { width: 100%; height: auto; image-rendering: pixelated; border-radius: 6px;
+    background: var(--water); display: block; }
+  aside { width: 300px; flex-shrink: 0; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 8px; padding: 12px; }
+  aside h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em;
+    color: var(--muted); margin: 0 0 8px; }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  td, th { padding: 3px 4px; text-align: right; white-space: nowrap; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  td:nth-child(2), th:nth-child(2) { text-align: left; overflow: hidden; text-overflow: ellipsis; max-width: 120px; }
+  tr.dead td { color: var(--muted); text-decoration: line-through; }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
+  #banner { margin-top: 10px; padding: 8px; border-radius: 6px; background: #1f3a24; display: none; }
+  #empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  @media (max-width: 800px) { main { flex-direction: column; } aside { width: 100%; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>OpenFront IA — partie en direct</h1>
+  <span class="stat">Carte <b id="map">—</b></span>
+  <span class="stat">Tick <b id="tick">—</b></span>
+  <span class="stat">Vitesse <b id="tps">—</b> ticks/s</span>
+  <span class="stat" id="conn">connexion…</span>
+  <div class="speed" id="speed">
+    <button data-v="1">x1</button><button data-v="10">x10</button><button data-v="max">max</button>
+  </div>
+</header>
+<main>
+  <div id="wrap">
+    <div id="empty">En attente d'une partie (lancez un agent).</div>
+    <canvas id="c" hidden></canvas>
+  </div>
+  <aside>
+    <h2>Classement</h2>
+    <table>
+      <thead><tr><th></th><th>Joueur</th><th>Tuiles</th><th>Troupes</th><th>Or</th></tr></thead>
+      <tbody id="rank"></tbody>
+    </table>
+    <div id="banner"></div>
+  </aside>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const canvas = $("c"), ctx = canvas.getContext("2d");
+let view = null; // { width, height, land: Uint8Array, image: ImageData }
+
+async function inflate(b64) {
+  const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate"));
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+function cssColor(c) {
+  // "hsl(h s% l%)" -> [r, g, b] via un canvas 1x1.
+  const k = document.createElement("canvas").getContext("2d");
+  k.fillStyle = c; k.fillRect(0, 0, 1, 1);
+  return k.getImageData(0, 0, 1, 1).data;
+}
+const colorCache = new Map();
+function rgb(c) { if (!colorCache.has(c)) colorCache.set(c, cssColor(c)); return colorCache.get(c); }
+
+const WATER = [22, 50, 74], LAND = [201, 192, 168];
+const fmt = (n) => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(n);
+
+async function onMap(m) {
+  const land = await inflate(m.land);
+  canvas.width = m.width; canvas.height = m.height;
+  view = { width: m.width, height: m.height, land, image: ctx.createImageData(m.width, m.height) };
+  $("map").textContent = `${m.map} (${m.size})`;
+  $("empty").hidden = true; canvas.hidden = false;
+}
+
+async function onFrame(f) {
+  $("tick").textContent = f.tick.toLocaleString("fr-FR");
+  $("tps").textContent = f.ticksPerSecond.toLocaleString("fr-FR");
+  for (const b of $("speed").children) b.classList.toggle("on", b.dataset.v === f.speed);
+  if (view === null) return;
+  const owners = new Uint16Array((await inflate(f.owners)).buffer);
+  const palette = new Map(f.players.map((p) => [p.id, rgb(p.color)]));
+  const px = view.image.data;
+  for (let i = 0; i < owners.length; i++) {
+    const c = owners[i] ? palette.get(owners[i]) ?? LAND : view.land[i] ? LAND : WATER;
+    px[i * 4] = c[0]; px[i * 4 + 1] = c[1]; px[i * 4 + 2] = c[2]; px[i * 4 + 3] = 255;
+  }
+  ctx.putImageData(view.image, 0, 0);
+
+  const ranked = [...f.players].sort((a, b) => b.tiles - a.tiles);
+  $("rank").innerHTML = ranked.map((p) => `
+    <tr class="${p.alive ? "" : "dead"}">
+      <td><span class="sw" style="background:${p.color}"></span></td>
+      <td title="${p.name}">${p.name}</td>
+      <td>${fmt(p.tiles)}</td><td>${fmt(p.troops)}</td><td>${fmt(p.gold)}</td>
+    </tr>`).join("");
+  const banner = $("banner");
+  banner.style.display = f.winner ? "block" : "none";
+  banner.textContent = f.winner ? `Vainqueur : ${f.winner}` : "";
+}
+
+let ws;
+function connect() {
+  ws = new WebSocket(`ws://${location.host}/ws`);
+  // Les messages sont traités dans l'ordre (la décompression est asynchrone).
+  let chain = Promise.resolve();
+  ws.onopen = () => { $("conn").textContent = "connecté"; };
+  ws.onclose = () => { $("conn").textContent = "déconnecté"; setTimeout(connect, 1000); };
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    chain = chain.then(() => (msg.type === "map" ? onMap(msg) : onFrame(msg)));
+  };
+}
+$("speed").addEventListener("click", (e) => {
+  const v = e.target.dataset?.v;
+  if (v && ws?.readyState === 1) ws.send(JSON.stringify({ type: "speed", value: v }));
+});
+connect();
+</script>
+</body>
+</html>

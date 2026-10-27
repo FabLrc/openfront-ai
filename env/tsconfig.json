@@ -1,0 +1,34 @@
+{
+  "compilerOptions": {
+    "target": "ES2020", // comme OpenFrontIO : sémantique des champs de classe du moteur
+    "lib": ["ES2022", "DOM"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "strictPropertyInitialization": false, // le moteur ne passe pas ce contrôle
+    "skipLibCheck": true,
+    "resolveJsonModule": true,
+    "experimentalDecorators": true,
+    "useDefineForClassFields": false,
+    "types": ["node"],
+    // Le moteur est importé directement depuis les sources du sous-module.
+    "paths": {
+      "@openfront/engine/*": ["../openfront/packages/engine/src/*"],
+      "@openfront/engine-api/*": ["../openfront/packages/engine-api/src/*"],
+      "@openfront/engine-lib/*": ["../openfront/packages/engine-lib/src/*"],
+      "@openfront/shared/*": ["../openfront/packages/shared/src/*"],
+      "@openfront/zbin": ["../openfront/packages/zbin/src/index.ts"],
+      "@openfront/zbin/*": ["../openfront/packages/zbin/src/*"],
+      "resources/*": ["../openfront/resources/*"]
+    }
+  },
+  // tsx n'applique ces options (champs de classe) qu'aux fichiers inclus : le
+  // moteur doit donc l'être aussi.
+  "include": [
+    "src/**/*",
+    "test/**/*",
+    "vitest.config.ts",
+    "../openfront/packages/*/src/**/*"
+  ],
+  "exclude": ["../openfront/packages/engine/src/worker"]
+}
