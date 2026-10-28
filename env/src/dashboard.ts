@@ -114,10 +114,10 @@ const DASHBOARD_HTML = `<!doctype html>
 <main>
   <div class="tiles" id="tiles"></div>
   <div class="grid" id="grid">
-    <div class="card"><h2>Victoires et rang (glissants)</h2><canvas id="c-win"></canvas></div>
-    <div class="card"><h2>Récompense par épisode</h2><canvas id="c-reward"></canvas></div>
-    <div class="card"><h2>Durée des épisodes (ticks)</h2><canvas id="c-ticks"></canvas></div>
-    <div class="card"><h2>Débit</h2><canvas id="c-speed"></canvas></div>
+    <div class="card" data-needs="episodes"><h2>Victoires et rang (glissants)</h2><canvas id="c-win"></canvas></div>
+    <div class="card" data-needs="episodes"><h2>Récompense par épisode</h2><canvas id="c-reward"></canvas></div>
+    <div class="card" data-needs="episodes"><h2>Durée des épisodes (ticks)</h2><canvas id="c-ticks"></canvas></div>
+    <div class="card" data-needs="throughput"><h2>Débit</h2><canvas id="c-speed"></canvas></div>
   </div>
   <h2 class="muted" style="font-size:13px;margin:20px 0 8px" id="train-title" hidden>ENTRAÎNEMENT</h2>
   <div class="grid" id="train"></div>
@@ -162,6 +162,8 @@ function lineChart(id, datasets, opts = {}) {
 const fmt = (n, d = 0) => Number.isFinite(n) ? n.toLocaleString("fr-FR", { maximumFractionDigits: d, minimumFractionDigits: d }) : "—";
 
 function render(data) {
+  // Une série d'entraînement seul n'a ni épisodes ni débit : on masque ces courbes.
+  for (const card of document.querySelectorAll("[data-needs]")) card.hidden = data[card.dataset.needs].length === 0;
   const w = Math.max(1, parseInt($("window").value, 10) || 50);
   const eps = data.episodes;
   const xs = eps.map((_, i) => i + 1);

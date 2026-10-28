@@ -40,6 +40,7 @@ def test_batch_reset_auto_et_metriques(runs_dir):
             assert env.active.all()
             policies = [RandomAgent(seed=b) for b in range(env.num_envs)]
             ended = 0
+            resets = 0
             for _ in range(120):
                 actions = np.zeros((env.num_envs, 5), dtype=np.int64)
                 for b in np.flatnonzero(env.active):
@@ -48,8 +49,11 @@ def test_batch_reset_auto_et_metriques(runs_dir):
                 assert rewards.shape == (8,)
                 ended += int((terms | truncs).sum())
                 for b in np.flatnonzero(terms | truncs):
-                    assert "rank" in infos[b] and "reset" in infos[b]
-            assert env.episodes > 0 and ended > 0
+                    assert "rank" in infos[b]
+                    # Réinitialisation en arrière-plan : siège inactif jusqu'au pas suivant.
+                    assert not env.active[b]
+                resets += sum("reset" in info for info in infos)
+            assert env.episodes > 0 and ended > 0 and resets > 0
         finally:
             env.close()
 

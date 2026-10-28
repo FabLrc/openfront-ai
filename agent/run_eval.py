@@ -13,7 +13,7 @@ import time
 
 import numpy as np
 
-from openfront_ai.agents import RandomAgent, RuleAgent
+from openfront_ai.agents import PolicyAgent, RandomAgent, RuleAgent
 from openfront_ai.vec import RUNS_DIR, ServerPool, VecOpenFrontEnv, performance_cores
 
 AGENTS = {"random": RandomAgent, "rule": RuleAgent}
@@ -28,7 +28,9 @@ def seat_obs(obs: dict, b: int) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--series", required=True, help="nom de la série (dossier runs/SERIE)")
-    parser.add_argument("--agent", choices=sorted(AGENTS), default="rule")
+    parser.add_argument("--agent", choices=[*sorted(AGENTS), "policy"], default="rule")
+    parser.add_argument("--checkpoint", help="checkpoint de la politique (--agent policy)")
+    parser.add_argument("--greedy", action="store_true", help="politique : action la plus probable au lieu d'échantillonner")
     parser.add_argument("--procs", type=int, default=performance_cores(), help="processus serveur (défaut : cœurs performance)")
     parser.add_argument("--games-per-proc", type=int, default=2)
     parser.add_argument("--agents", type=int, default=1, help="sièges d'agents par partie")
@@ -39,6 +41,7 @@ def main() -> None:
     parser.add_argument("--episodes", type=int, default=0, help="nombre d'épisodes de sièges (0 : selon --minutes)")
     parser.add_argument("--record-every", type=int, default=0, help="enregistre une partie sur N (0 : aucune)")
     parser.add_argument("--base-port", type=int, default=6000)
+    parser.add_argument("--seed", help="préfixe des graines (même valeur = mêmes parties d'un agent à l'autre)")
     parser.add_argument("--no-dashboard", action="store_true", help="ne sert pas le tableau de bord sur :8080")
     args = parser.parse_args()
     if args.minutes <= 0 and args.episodes <= 0:
@@ -53,12 +56,17 @@ def main() -> None:
             nations=args.nations,
             difficulty=args.difficulty,
             max_ticks=args.max_ticks,
-            seed=f"{args.series}-{int(time.time())}",
+            seed=args.seed or f"{args.series}-{int(time.time())}",
             series=args.series,
             record=args.series if args.record_every > 0 else None,
             record_every=max(1, args.record_every),
         )
-        policies = [AGENTS[args.agent](seed=i) for i in range(env.num_envs)]
+        if args.agent == "policy":
+            if not args.checkpoint:
+                raise SystemExit("--agent policy demande --checkpoint")
+            policy = PolicyAgent(args.checkpoint, greedy=args.greedy, seed=0)
+        else:
+            policies = [AGENTS[args.agent](seed=i) for i in range(env.num_envs)]
         start = time.monotonic()
         obs, _ = env.reset()
         done_episodes = 0
@@ -67,8 +75,16 @@ def main() -> None:
         try:
             while True:
                 actions = np.zeros((env.num_envs, 5), dtype=np.int64)
-                for b in np.flatnonzero(env.active):
-                    actions[b] = policies[b].act(seat_obs(obs, b))
+                active = np.flatnonzero(env.active)
+                if args.agent == "policy":
+                    if len(active):
+                        # Toutes les décisions du lot en un seul passage du réseau.
+                        sub = {k: v[active] for k, v in obs.items() if k != "masks"}
+                        sub["masks"] = {k: v[active] for k, v in obs["masks"].items()}
+                        actions[active] = policy.act_batch(sub)
+                else:
+                    for b in active:
+                        actions[b] = policies[b].act(seat_obs(obs, b))
                 obs, _, terms, truncs, infos = env.step(actions)
                 for b in np.flatnonzero(terms | truncs):
                     done_episodes += 1
@@ -98,6 +114,7 @@ def main() -> None:
             "victoires_%": round(100 * float(np.mean([r.get("won", False) for r in results])), 1),
             "rang_moyen": round(float(np.mean([r.get("rank", np.nan) for r in results])), 2),
         }, ensure_ascii=False))
+        print(f"  (détail par épisode, dont la part de territoire finale : {RUNS_DIR / args.series}/metrics.jsonl)")
 
 
 if __name__ == "__main__":

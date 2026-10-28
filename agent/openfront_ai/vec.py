@@ -7,7 +7,8 @@
   partie). À chaque pas, il envoie les actions de tous les sièges, puis lit
   toutes les réponses : les processus calculent en même temps. Les
   observations de tous les sièges arrivent empilées (numpy, [B, ...]). Une
-  partie dont tous les sièges ont fini est réinitialisée aussitôt.
+  partie dont tous les sièges ont fini est réinitialisée en arrière-plan :
+  ses sièges sautent un pas (inactifs) au lieu de bloquer tout le lot.
 """
 
 from __future__ import annotations
@@ -114,6 +115,8 @@ class _Game:
     episode: int = 0
     tick: int = 0
     agents: list[str] = field(default_factory=list)
+    # Réinitialisation envoyée, réponse pas encore lue.
+    resetting: bool = False
 
 
 class VecOpenFrontEnv:
@@ -171,6 +174,8 @@ class VecOpenFrontEnv:
         self._t_mark = time.monotonic()
         self._decisions = 0
         self._ticks = 0
+        self._server_ms = 0.0
+        self._server_steps = 0
         self.episodes = 0
 
     # ── API ──
@@ -189,7 +194,11 @@ class VecOpenFrontEnv:
         terminated = np.zeros(self.num_envs, dtype=bool)
         truncated = np.zeros(self.num_envs, dtype=bool)
         infos: list[dict[str, Any]] = [{} for _ in range(self.num_envs)]
-        for g in self.games:
+        # Parties en cours de réinitialisation : leurs sièges étaient inactifs
+        # quand les actions ont été choisies ; elles sautent ce pas.
+        resetting = [g for g in self.games if g.resetting]
+        stepping = [g for g in self.games if not g.resetting]
+        for g in stepping:
             acts = {}
             notes = {}
             for j, name in enumerate(self.names):
@@ -200,9 +209,12 @@ class VecOpenFrontEnv:
                     if annotations and b in annotations:
                         notes[name] = annotations[b]
             g.client.send({"cmd": "step", "ticks": self.ticks_per_step, "actions": acts, **({"annotations": notes} if notes else {})})
-        finished: list[_Game] = []
-        for g in self.games:
+        for g in resetting:
+            self._receive_reset(g, infos)
+        for g in stepping:
             header, buffers = g.client.receive()
+            self._server_ms += header.get("server_ms", 0.0)
+            self._server_steps += 1
             self._ticks += header["state"]["tick"] - g.tick
             g.tick = header["state"]["tick"]
             for j, name in enumerate(self.names):
@@ -218,14 +230,14 @@ class VecOpenFrontEnv:
             for j, name in enumerate(self.names):
                 self.active[g.index * self.n_agents + j] = name in g.agents
             if not g.agents or header["state"]["done"]:
-                finished.append(g)
-        # Réinitialisation automatique : l'observation renvoyée pour ces sièges
-        # est celle de la nouvelle partie, l'ancienne info reste dans infos.
-        for g in finished:
-            self.episodes += 1
-            self._send_reset(g)
-        for g in finished:
-            self._receive_reset(g, infos)
+                # Réinitialisation automatique, sans attendre la réponse : elle
+                # est lue au pas suivant, pendant que les autres parties jouent.
+                # D'ici là, ces sièges sont inactifs ; infos garde le bilan de
+                # l'épisode fini, et infos[b]["reset"] arrivera au pas suivant.
+                self.episodes += 1
+                self._send_reset(g)
+                for j in range(self.n_agents):
+                    self.active[g.index * self.n_agents + j] = False
         self._log_throughput()
         return self.obs, rewards, terminated, truncated, infos
 
@@ -242,12 +254,14 @@ class VecOpenFrontEnv:
     # ── interne ──
 
     def _send_reset(self, g: _Game) -> None:
+        g.resetting = True
         g.episode += 1
         g.tick = 0
         g.client.send({"cmd": "reset", "config": {**self.config, "seed": f"{self.seed}-{g.index}-{g.episode}"}})
 
     def _receive_reset(self, g: _Game, infos: list[dict[str, Any]]) -> None:
         header, buffers = g.client.receive()
+        g.resetting = False
         if self.obs is None:
             self._allocate(header["spec"], buffers)
         g.agents = list(header["agents"])
@@ -287,6 +301,9 @@ class VecOpenFrontEnv:
             "games": len(self.games),
             "seats": self.num_envs,
             "episodes": self.episodes,
+            # Calcul moyen d'un pas de partie côté serveur ; le reste du temps
+            # est l'attente de la partie la plus lente du lot, les sockets et Python.
+            "server_ms_per_step": self._server_ms / max(1, self._server_steps),
         }
         self.last_throughput = line
         if self.series:
@@ -297,6 +314,8 @@ class VecOpenFrontEnv:
         self._t_mark = now
         self._decisions = 0
         self._ticks = 0
+        self._server_ms = 0.0
+        self._server_steps = 0
 
 
 def log_train(series: str, **values: Any) -> None:

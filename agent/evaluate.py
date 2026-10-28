@@ -11,13 +11,11 @@ import statistics
 import time
 
 from openfront_ai import OpenFrontEnv
-from openfront_ai.agents import RandomAgent, RuleAgent
-
-AGENTS = {"random": RandomAgent, "rule": RuleAgent}
+from openfront_ai.agents import PolicyAgent, RandomAgent, RuleAgent
 
 
 def play(env: OpenFrontEnv, policy_cls, seed: str, policy_seed: int) -> dict:
-    policies = {a: policy_cls(seed=policy_seed + i) for i, a in enumerate(env.possible_agents)}
+    policies = {a: policy_cls(policy_seed + i) for i, a in enumerate(env.possible_agents)}
     t_reset = time.perf_counter()
     obs, _ = env.reset(seed=seed)
     start = time.perf_counter()
@@ -49,7 +47,9 @@ def play(env: OpenFrontEnv, policy_cls, seed: str, policy_seed: int) -> dict:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--games", type=int, default=10)
-    parser.add_argument("--agent", choices=["random", "rule", "both"], default="both")
+    parser.add_argument("--agent", choices=["random", "rule", "both", "policy"], default="both")
+    parser.add_argument("--checkpoint", help="checkpoint de la politique (--agent policy)")
+    parser.add_argument("--greedy", action="store_true")
     parser.add_argument("--agents", type=int, default=1, help="nombre de sièges (tous joués par le même agent)")
     parser.add_argument("--nations", type=int, default=7)
     parser.add_argument("--difficulty", default="Medium")
@@ -62,6 +62,11 @@ def main() -> None:
     args = parser.parse_args()
 
     names = ["random", "rule"] if args.agent == "both" else [args.agent]
+    factories = {
+        "random": lambda s: RandomAgent(seed=s),
+        "rule": lambda s: RuleAgent(seed=s),
+        "policy": lambda s: PolicyAgent(args.checkpoint, greedy=args.greedy, seed=s),
+    }
     env = OpenFrontEnv(
         agents=args.agents,
         nations=args.nations,
@@ -76,7 +81,7 @@ def main() -> None:
         for name in names:
             games = []
             for g in range(args.games):
-                r = play(env, AGENTS[name], f"{args.seed}-{g}", policy_seed=g)
+                r = play(env, factories[name], f"{args.seed}-{g}", policy_seed=g)
                 games.append(r)
                 outcome = "VICTOIRE" if r["won"] else f"rang {r['rank']}/{r['players']}"
                 print(

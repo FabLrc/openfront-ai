@@ -13,6 +13,7 @@ import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
 import { simpleHash } from "@openfront/engine-lib/Util";
 import { Player } from "@openfront/engine/game/Game";
 import { GameState, OpenFrontGame, ResetConfig } from "./game";
+import { NationLabel, NationTap } from "./nationTap";
 import { Buffers } from "./protocol";
 import { appendMetrics, IndexEntry, RecordOptions, shouldRecord, writeRecord } from "./records";
 import {
@@ -44,6 +45,12 @@ export interface EnvConfig extends ResetConfig, Partial<SeatOptions> {
   record?: RecordOptions;
   /** Série de métriques : une ligne par siège fini dans runs/<series>/metrics.jsonl. */
   series?: string;
+  /**
+   * Données d'imitation : nombre de Nations observées. Leurs observations
+   * (nation_0, nation_1…) et l'action de chacune pendant le pas (`labels`)
+   * sont renvoyées à chaque pas. Voir nationTap.ts.
+   */
+  observeNations?: number;
 }
 
 /** Compteurs d'un siège sur l'épisode, pour les métriques. */
@@ -61,6 +68,10 @@ interface SeatStats {
 
 export interface StepResult {
   state: GameState;
+  /** Action de chaque Nation observée pendant ce pas (observeNations). */
+  labels?: Record<string, NationLabel>;
+  /** Nations observées encore en vie, dont l'observation est jointe. */
+  observed?: string[];
   /** Agents encore actifs après ce pas. */
   agents: string[];
   rewards: Record<string, number>;
@@ -81,6 +92,7 @@ export class AgentEnv {
   private outcomes = new Map<string, { rank: number; players: number; won: boolean }>();
   private recording: boolean;
   private stats = new Map<string, SeatStats>();
+  private tap: NationTap | null = null;
   /** Entrée d'index une fois la partie écrite. */
   recorded: IndexEntry | null = null;
 
@@ -97,6 +109,10 @@ export class AgentEnv {
       (p, i) => new AgentSeat(i, `agent_${i}`, p, this.map, game.config.seed),
     );
     this.active = new Set(this.seats.map((s) => s.name));
+    if (!game.game.inSpawnPhase()) this.numSpawned = game.game.players().length;
+    if ((config.observeNations ?? 0) > 0) {
+      this.tap = new NationTap(game.game, config.observeNations!, game.config.seed);
+    }
     this.recording = config.record !== undefined && shouldRecord(config.record);
     const byClient = new Map(this.seats.map((s) => [s.player.clientID(), s]));
     game.onExecutionCreated((intent, exec) => byClient.get(intent.clientID)?.attachExecution(exec));
@@ -153,6 +169,12 @@ export class AgentEnv {
     } else {
       g.step(ticks, intents);
     }
+    // Décisions des Nations observées pendant ces ticks, traduites avec
+    // l'observation précédente (avant de la recalculer dans result()).
+    const labels: Record<string, NationLabel> = {};
+    if (this.tap !== null) {
+      for (const [seat, label] of this.tap.labels()) labels[seat.name] = label;
+    }
 
     const accepted = new Map<string, boolean | null>();
     for (const seat of this.seats) {
@@ -170,7 +192,9 @@ export class AgentEnv {
     for (const p of g.game.allPlayers()) {
       if (!p.isAlive() && !this.deathTick.has(p)) this.deathTick.set(p, g.game.ticks());
     }
-    return this.result(accepted, invalid);
+    const out = this.result(accepted, invalid);
+    if (this.tap !== null) out.labels = labels;
+    return out;
   }
 
   private randomSpawn(seat: AgentSeat): Action {
@@ -278,9 +302,22 @@ export class AgentEnv {
         }
       }
     }
+    let observed: string[] | undefined;
+    if (this.tap !== null && !g.inSpawnPhase()) {
+      this.tap.attach((p, i) => new AgentSeat(1000 + i, `nation_${i}`, p, this.map, this.game.config.seed));
+      observed = [];
+      const nframe = frame ?? new SharedFrame(this.map);
+      for (const seat of this.tap.seats) {
+        if (!seat.player.isAlive()) continue;
+        seat.computeMasks(nframe);
+        buffers = { ...buffers, ...seat.observe(nframe, this.numSpawned) };
+        observed.push(seat.name);
+      }
+    }
     if ((this.seats.length > 0 && this.active.size === 0) || state.done) this.finish();
     return {
       state,
+      observed,
       agents: [...this.active],
       rewards,
       terminations,
