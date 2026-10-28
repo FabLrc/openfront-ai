@@ -101,8 +101,15 @@ export interface SeatOptions {
   actionHeight: number;
   /** Nombre de joueurs dans la table (hors ligne « terres neutres »). */
   k: number;
-  /** Nombre maximal de cases testées exactement pour les bateaux. */
+  /** Nombre maximal de cases proposées pour les bateaux (les plus proches). */
   boatCandidates: number;
+  /** Tests exacts (recherche de chemin sur l'eau) au plus par pas ; les autres viennent du cache. */
+  boatChecksPerStep: number;
+  /** Durée de vie, en pas, d'un résultat de test exact en cache. */
+  boatCacheSteps: number;
+  /** Cases de construction recalculées au plus par pas, et durée de vie du cache. */
+  buildChecksPerStep: number;
+  buildCacheSteps: number;
 }
 
 export const DEFAULT_SEAT_OPTIONS: SeatOptions = {
@@ -111,8 +118,12 @@ export const DEFAULT_SEAT_OPTIONS: SeatOptions = {
   actionWidth: 32,
   actionHeight: 16,
   k: 16,
-  // Chaque test exact coûte ~0,07 ms (recherches de chemin sur l'eau).
   boatCandidates: 8,
+  // Chaque test exact coûte ~0,1 ms (recherches de chemin sur l'eau).
+  boatChecksPerStep: 3,
+  boatCacheSteps: 5,
+  buildChecksPerStep: 24,
+  buildCacheSteps: 5,
 };
 
 const logNorm = (x: number, scale: number) => Math.log1p(Math.max(0, x)) / Math.log1p(scale);
@@ -272,6 +283,17 @@ export class AgentSeat {
   private portBuildTile: Int32Array;
   private pending: Pending | null = null;
   private courted = new Set<Player>();
+  /** Pas courant (incrémenté à chaque calcul des masques). */
+  private maskStep = 0;
+  /** Résultat du test exact de bateau par case : tuile visée, verdict, pas du test. */
+  private boatCache = new Map<number, { tile: TileRef; ok: boolean; at: number }>();
+  /** Candidats et verdicts de construction par case. */
+  private buildCache = new Map<
+    number,
+    { land: TileRef; landOk: boolean; port: TileRef; portOk: boolean; at: number }
+  >();
+  /** Vrai si l'action précédente a été annulée car son masque (en cache) était périmé. */
+  lastStale = false;
   lastAction = "—";
   lastAccepted: boolean | null = null;
   lastRejectReason: string | null = null;
@@ -325,6 +347,7 @@ export class AgentSeat {
 
   /** `frame` n'est nécessaire qu'après la phase de spawn (masque de construction). */
   computeMasks(frame?: SharedFrame): void {
+    this.maskStep++;
     const game = this.game;
     const p = this.player;
     const rows = this.k + 1;
@@ -372,7 +395,7 @@ export class AgentSeat {
       if (troopsOk && attackable.has(o.smallID()) && p.canAttackPlayer(o) && !this.courted.has(o)) {
         this.targetMask[T_ATTACK * rows + r] = 1;
       }
-      if (p.canSendAllianceRequest(o)) this.targetMask[T_ALLIANCE * rows + r] = 1;
+      if (p.canSendAllianceRequest(o) && !this.incomingExpiresSoon(o)) this.targetMask[T_ALLIANCE * rows + r] = 1;
       if (p.isAlliedWith(o)) this.targetMask[T_BREAK * rows + r] = 1;
     }
 
@@ -484,13 +507,95 @@ export class AgentSeat {
       }
     }
     candidates.sort((a, b) => a.d - b.d || a.cell - b.cell);
+    // Les filtres ci-dessus sont refaits à chaque pas ; le test exact (trajet
+    // par l'eau) est gardé en cache quelques pas, avec un nombre limité de
+    // nouveaux tests par pas. Une case pas encore testée reste masquée.
+    const { boatChecksPerStep, boatCacheSteps } = this.map.opts;
+    let budget = boatChecksPerStep;
     for (const { cell, tile } of candidates.slice(0, this.map.opts.boatCandidates)) {
-      // Mêmes contrôles que TransportShipExecution.init.
-      const dst = targetTransportTile(game, p, tile);
-      if (dst === null || p.canBuild(UnitType.TransportShip, dst) === false) continue;
+      const cached = this.boatCache.get(cell);
+      let ok: boolean;
+      if (cached !== undefined && cached.tile === tile && this.maskStep - cached.at < boatCacheSteps) {
+        ok = cached.ok;
+      } else if (budget > 0) {
+        budget--;
+        ok = this.boatReachable(tile);
+        this.boatCache.set(cell, { tile, ok, at: this.maskStep });
+      } else {
+        continue;
+      }
+      if (!ok) continue;
       this.boatTile[cell] = tile;
       this.cellMask[T_BOAT * A + cell] = 1;
     }
+  }
+
+  /**
+   * Une demande d'alliance reçue rend la réponse possible même pendant le délai
+   * entre deux demandes ; si elle expire avant l'exécution de l'intention, le
+   * moteur refuse. On ne propose pas d'y répondre dans ses 20 derniers ticks.
+   */
+  private incomingExpiresSoon(o: Player): boolean {
+    const g = this.game;
+    const req = this.player.incomingAllianceRequests().find((r) => r.requestor() === o);
+    return req !== undefined && req.createdAt() + g.config().allianceRequestDuration() - g.ticks() <= 20;
+  }
+
+  /** Mêmes contrôles que TransportShipExecution.init (recherches de chemin). */
+  private boatReachable(tile: TileRef): boolean {
+    const dst = targetTransportTile(this.game, this.player, tile);
+    return dst !== null && this.player.canBuild(UnitType.TransportShip, dst) !== false;
+  }
+
+  /**
+   * Une terre étrangère à 2 cases ou moins : la tuile peut être prise avant
+   * que la construction ne s'exécute (deux ticks plus tard). L'eau ne compte
+   * pas, une côte reste candidate pour le port.
+   */
+  private exposed(t: TileRef): boolean {
+    const gm = this.game.map();
+    const { width: w, height: h } = this.map;
+    const me = this.player.smallID();
+    const x = t % w;
+    const y = Math.floor(t / w);
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const n = ny * w + nx;
+        if (gm.isLand(n) && gm.ownerID(n) !== me) return true;
+      }
+    }
+    return false;
+  }
+
+  /** canBuild(type, tuile) pour une structure, hors contrôle de l'or (fait à part). */
+  private placementOk(port: boolean, t: TileRef): boolean {
+    const game = this.game;
+    const impl = this.player as unknown as {
+      landBasedStructureSpawn(t: TileRef): TileRef | false;
+      portSpawn(t: TileRef, valid: TileRef[] | null): TileRef | false;
+    };
+    if (port) return impl.portSpawn(t, null) !== false;
+    // validStructureSpawnTiles(t) contient t lui-même si aucune structure (même
+    // en construction) n'est à moins de structureMinDist : une seule requête
+    // spatiale suffit alors, sans le parcours de rayon 15 du moteur.
+    const minDist = game.config().structureMinDist();
+    const itself = !game
+      .nearbyUnits(t, minDist, Structures.types, undefined, true)
+      .some(({ unit }) => game.euclideanDistSquared(unit.tile(), t) < minDist * minDist);
+    return itself || impl.landBasedStructureSpawn(t) !== false;
+  }
+
+  /** Construction encore possible maintenant sur cette tuile (revérification avant envoi). */
+  private buildStillValid(unit: UnitType, t: TileRef): boolean {
+    return (
+      t >= 0 &&
+      this.game.owner(t) === this.player &&
+      !this.exposed(t) &&
+      this.placementOk(unit === UnitType.Port, t)
+    );
   }
 
   private computeBuildMask(frame: SharedFrame): void {
@@ -504,78 +609,57 @@ export class AgentSeat {
     const needPort = affordable[BUILD_UNITS.indexOf(UnitType.Port)];
     const needLand = affordable.some((a, i) => a && BUILD_UNITS[i] !== UnitType.Port);
 
-    // Tuile possédée la plus centrale de chaque case (et côte possédée pour le
-    // port), hors frontière : une tuile frontalière peut être prise avant que
-    // la construction ne s'exécute.
-    const w = this.map.width;
-    this.landBuildTile.fill(-1);
-    this.portBuildTile.fill(-1);
+    // Pour chaque case où je possède des terres : la tuile possédée la plus
+    // centrale (la côte pour le port) loin de toute terre étrangère, et le
+    // verdict de placement du moteur. Ce calcul est gardé en cache quelques
+    // pas, avec un nombre limité de cases recalculées par pas ; le choix
+    // effectif est revérifié avant l'envoi (buildStillValid).
     const gm = game.map();
     const me = p.smallID();
-    const h = this.map.height;
-    // Une terre étrangère à 2 cases ou moins : la tuile peut être prise avant
-    // que la construction ne s'exécute (deux ticks plus tard). L'eau ne
-    // compte pas, une côte reste candidate pour le port.
-    const exposed = (t: TileRef) => {
-      const x = t % w;
-      const y = Math.floor(t / w);
-      for (let dy = -2; dy <= 2; dy++) {
-        for (let dx = -2; dx <= 2; dx++) {
-          const nx = x + dx;
-          const ny = y + dy;
-          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
-          const n = ny * w + nx;
-          if (gm.isLand(n) && gm.ownerID(n) !== me) return true;
-        }
-      }
-      return false;
-    };
-    // Tuiles de chaque case triées du centre vers le bord : la première qui
-    // convient est la plus centrale. Les cases où je n'ai rien sont sautées.
-    const { landByActCell, landOffsets } = this.map;
+    const { landByActCell, landOffsets, opts } = this.map;
+    let budget = opts.buildChecksPerStep;
+    this.landBuildTile.fill(-1);
+    this.portBuildTile.fill(-1);
     for (let c = 0; c < A; c++) {
-      if (frame.actOwnerCounts[c * frame.stride + me] === 0) continue;
-      if (needLand) {
+      if (frame.actOwnerCounts[c * frame.stride + me] === 0) {
+        this.buildCache.delete(c);
+        continue;
+      }
+      let entry = this.buildCache.get(c);
+      const fresh = entry !== undefined && this.maskStep - entry.at < opts.buildCacheSteps;
+      if (!fresh) {
+        if (budget <= 0) continue;
+        budget--;
+        let land = -1;
+        let port = -1;
         for (let i = landOffsets[c]; i < landOffsets[c + 1]; i++) {
           const t = landByActCell[i];
-          if (gm.ownerID(t) === me && !exposed(t)) {
-            this.landBuildTile[c] = t;
+          if (gm.ownerID(t) === me && !this.exposed(t)) {
+            land = t;
             break;
           }
         }
-      }
-      if (needPort) {
         for (const t of this.map.shoreByActCell[c]) {
-          if (gm.ownerID(t) === me && !exposed(t)) {
-            this.portBuildTile[c] = t;
+          if (gm.ownerID(t) === me && !this.exposed(t)) {
+            port = t;
             break;
           }
         }
+        entry = {
+          land,
+          landOk: land >= 0 && this.placementOk(false, land),
+          port,
+          portOk: port >= 0 && this.placementOk(true, port),
+          at: this.maskStep,
+        };
+        this.buildCache.set(c, entry);
       }
-    }
-
-    const impl = p as unknown as {
-      landBasedStructureSpawn(t: TileRef): TileRef | false;
-      portSpawn(t: TileRef, valid: TileRef[] | null): TileRef | false;
-    };
-    const minDist = game.config().structureMinDist();
-    // validStructureSpawnTiles(t) contient t lui-même si aucune structure (même
-    // en construction) n'est à moins de structureMinDist : une seule requête
-    // spatiale suffit alors, sans le parcours de rayon 15 du moteur.
-    const tileItselfValid = (t: TileRef) =>
-      !game
-        .nearbyUnits(t, minDist, Structures.types, undefined, true)
-        .some(({ unit }) => game.euclideanDistSquared(unit.tile(), t) < minDist * minDist);
-    for (let c = 0; c < A; c++) {
-      const land = this.landBuildTile[c];
-      // Même résultat que canBuild(type, tuile) pour toutes les structures terrestres.
-      const landOk =
-        needLand && land >= 0 && (tileItselfValid(land) || impl.landBasedStructureSpawn(land) !== false);
-      const port = this.portBuildTile[c];
-      const portOk = needPort && port >= 0 && impl.portSpawn(port, null) !== false;
+      this.landBuildTile[c] = entry!.land;
+      this.portBuildTile[c] = entry!.port;
       BUILD_UNITS.forEach((u, i) => {
         if (!affordable[i]) return;
-        if (u === UnitType.Port ? portOk : landOk) {
+        const isPort = u === UnitType.Port;
+        if (isPort ? needPort && entry!.portOk : needLand && entry!.landOk) {
           this.unitCellMask[i * A + c] = 1;
           this.unitMask[i] = 1;
           this.cellMask[T_BUILD * A + c] = 1;
@@ -583,6 +667,7 @@ export class AgentSeat {
       });
     }
   }
+
 
   // ── Observation ──
 
@@ -764,6 +849,7 @@ export class AgentSeat {
 
   /** Intention correspondant à l'action (null pour « rien » ou une action masquée). */
   toIntent(a: Action): StampedIntent | null {
+    this.lastStale = false;
     if (!this.isValid(a)) {
       this.pending = null;
       this.lastAction = a[0] === T_NOOP ? "rien" : `action masquée (${ACTION_TYPES[a[0]] ?? a[0]})`;
@@ -799,6 +885,13 @@ export class AgentSeat {
         break;
       case T_BOAT: {
         tile = this.boatTile[cell];
+        // Verdict venu du cache : on le refait avant d'envoyer l'intention.
+        if (this.boatCache.get(cell)?.at !== this.maskStep && !this.boatReachable(tile)) {
+          this.pending = null;
+          this.lastStale = true;
+          this.lastAction = `bateau annulé (case ${cell}, masque périmé)`;
+          return null;
+        }
         intent = { type: "boat", troops, dst: tile };
         description = `bateau vers ${this.game.owner(tile).isPlayer() ? (this.game.owner(tile) as Player).displayName() : "terres neutres"} (case ${cell}, ${pct})`;
         break;
@@ -806,6 +899,12 @@ export class AgentSeat {
       case T_BUILD: {
         const u = BUILD_UNITS[unit];
         tile = u === UnitType.Port ? this.portBuildTile[cell] : this.landBuildTile[cell];
+        if (this.buildCache.get(cell)?.at !== this.maskStep && !this.buildStillValid(u, tile)) {
+          this.pending = null;
+          this.lastStale = true;
+          this.lastAction = `construction annulée (case ${cell}, masque périmé)`;
+          return null;
+        }
         intent = { type: "build_unit", unit: u, tile };
         description = `construit ${u} (case ${cell})`;
         break;
@@ -861,9 +960,22 @@ export class AgentSeat {
               ? "cible immunisée"
               : null
         : null;
+      const canSend = pend.type === T_ALLIANCE ? p.canSendAllianceRequest(pend.target!) : true;
+      const incoming = pend.type === T_ALLIANCE && p.incomingAllianceRequests().some((r) => r.requestor() === pend.target);
       init(mg, t);
+      if (pend.type === T_ALLIANCE) {
+        pend.reason = !p.isAlive()
+          ? "agent mort"
+          : !canSend
+            ? "demande impossible à l'exécution"
+            : incoming
+              ? "acceptation sans alliance"
+              : "demande non créée";
+      }
       if (pend.type === T_ATTACK || pend.type === T_BOAT) {
-        pend.reason = before ?? (pend.type === T_ATTACK ? "plus de front commun" : "pas de trajet par l'eau");
+        pend.reason = !p.isAlive()
+          ? "agent mort"
+          : (before ?? (pend.type === T_ATTACK ? "plus de front commun" : "pas de trajet par l'eau"));
       }
       switch (pend.type) {
         case T_ATTACK: {

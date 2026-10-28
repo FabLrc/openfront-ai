@@ -18,6 +18,7 @@ async function play(config: EnvConfig, steps: number, actionSeed: number) {
   const random = new PseudoRandom(actionSeed);
   const accepted: Record<string, number> = {};
   const rejected: { type: string; tick: number; action: string }[] = [];
+  let stale = 0;
   let result = env.step({}); // phase de spawn (spawn aléatoire valide)
   for (let i = 0; i < steps && result.agents.length > 0; i++) {
     const actions: Record<string, Action> = {};
@@ -31,10 +32,11 @@ async function play(config: EnvConfig, steps: number, actionSeed: number) {
       const ok = result.infos[seat.name].accepted;
       const type = ACTION_TYPES[a[0]];
       if (ok === true) accepted[type] = (accepted[type] ?? 0) + 1;
+      else if (seat.lastStale) stale++;
       else rejected.push({ type, tick: result.state.tick, action: `${seat.lastAction} [${seat.lastRejectReason}]` });
     }
   }
-  return { hash: result.state.hash, tick: result.state.tick, accepted, rejected, env };
+  return { hash: result.state.hash, tick: result.state.tick, accepted, rejected, stale, env };
 }
 
 describe("sièges d'agents", () => {
@@ -52,13 +54,21 @@ describe("sièges d'agents", () => {
   async function sample(games: [string, number, number][]) {
     const accepted: Record<string, number> = {};
     const rejected: { type: string; tick: number; action: string }[] = [];
+    let stale = 0;
     for (const [seed, agents, nations] of games) {
       const r = await play({ ...BASE, seed, agents, nations }, 400, 7);
       for (const [k, v] of Object.entries(r.accepted)) accepted[k] = (accepted[k] ?? 0) + v;
       rejected.push(...r.rejected);
+      stale += r.stale;
     }
-    const total = Object.values(accepted).reduce((a, b) => a + b, 0) + rejected.length;
-    console.error(`acceptées ${JSON.stringify(accepted)}, refusées ${rejected.length}/${total}`, rejected);
+    const total = Object.values(accepted).reduce((a, b) => a + b, 0) + rejected.length + stale;
+    console.error(
+      `acceptées ${JSON.stringify(accepted)}, refusées ${rejected.length}/${total}, actions annulées (cache périmé) ${stale}`,
+      rejected,
+    );
+    // Masque de bateau ou de construction venu du cache et périmé : l'action est annulée avant
+    // l'envoi (le moteur ne la voit pas). Cela doit rester rare.
+    expect(stale / total).toBeLessThan(0.02);
     return { accepted, rejected, total };
   }
 
@@ -66,7 +76,7 @@ describe("sièges d'agents", () => {
   // exécutions en cours avancées : un front, une tuile ou un trajet par l'eau
   // peut disparaître entre-temps. Les masques prennent des marges ; il reste
   // de rares refus de ce type, jamais une cible interdite (alliée, immunisée).
-  const RACES = ["plus de front commun", "pas de trajet par l'eau", "tuile perdue", "cible morte"];
+  const RACES = ["plus de front commun", "pas de trajet par l'eau", "tuile perdue", "cible morte", "agent mort"];
 
   it("un agent seul : refus très rares, seulement par course avec le tick suivant", async () => {
     const { accepted, rejected, total } = await sample([
