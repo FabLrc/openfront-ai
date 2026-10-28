@@ -63,6 +63,8 @@ def performance_cores() -> int:
 
 def _port_free(port: int) -> bool:
     with socket.socket() as s:
+        # un port en TIME_WAIT (serveur arrêté juste avant) reste réutilisable
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         try:
             s.bind(("127.0.0.1", port))
             return True
