@@ -19,6 +19,7 @@ affiche la partie en direct.
 | `viewer/` | Page « partie en direct », servie par le serveur Node. |
 | `scripts/` | Installation, ouverture d'un replay dans le lecteur officiel. |
 | `runs/` | Parties enregistrées (non versionné). |
+| `data/` | Données d'imitation (non versionné). |
 
 ## Installation
 
@@ -60,7 +61,9 @@ NODE_BIN=/opt/homebrew/opt/node@24/bin NPM_BIN=~/openfront-bench/tools/node_modu
 3. Ouvrir <http://localhost:8080/live> pour suivre la partie. Les boutons
    **x1** (temps réel, 10 ticks/s), **x10** et **max** règlent la vitesse de
    simulation ; par défaut le serveur va au maximum. Les territoires des agents
-   sont entourés de blanc et étiquetés « IA » ; un panneau montre leur dernière
+   sont entourés de blanc et étiquetés « IA » ; structures, navires, trains,
+   bombes (avec leur trajectoire et leur explosion) et retombées sont dessinés
+   à la couleur de leur propriétaire (légende à droite) ; un panneau montre leur dernière
    action (acceptée ou non par le moteur), le nombre d'actions valides par type
    et les probabilités si l'agent les envoie.
 
@@ -218,9 +221,11 @@ with ServerPool(4) as pool:                       # 4 processus (ports 6000…)
 
 `B` = parties × sièges. Toutes les requêtes partent avant que les réponses
 soient lues : les processus calculent en même temps. Une partie dont tous les
-sièges ont fini est réinitialisée aussitôt (nouvelle graine) ; `infos[b]`
-garde alors le bilan de l'épisode (`rank`, `won`…) et `infos[b]["reset"]`
-celui de la nouvelle partie.
+sièges ont fini est réinitialisée en arrière-plan (nouvelle graine) :
+`infos[b]` garde le bilan de l'épisode (`rank`, `won`…), ses sièges sont
+inactifs pendant un pas, puis `infos[b]["reset"]` arrive avec la première
+observation de la nouvelle partie. Ainsi une réinitialisation (chargement de
+la carte, phase de spawn) ne bloque pas tout le lot.
 
 ### Métriques
 
@@ -302,16 +307,71 @@ caffeinate -i agent/.venv/bin/python agent/evaluate.py --games 200 --record long
 Mieux vaut découper les longues mesures en plusieurs séries courtes (une
 série par commande, chacune dans son dossier `runs/`).
 
-## Agents de référence
+## Imitation des Nations (behavior cloning)
 
-20 parties FFA World Compact, 1 siège contre 7 Nations Medium (`evaluate.py --games 20`) :
+Première étape d'apprentissage : imiter les Nations du jeu.
 
-| Agent | Victoires | Rang moyen | Durée de vie moyenne |
-|---|---|---|---|
-| aléatoire (dans les masques) | 0 % | 7,80 / 8 | 2 200 ticks |
-| à règles (terres neutres, voisin le plus faible, villes) | 0 % | 5,45 / 8 | 8 200 ticks |
+```bash
+caffeinate -i agent/.venv/bin/python agent/collect_bc.py --minutes 10      # données → data/bc/
+caffeinate -i agent/.venv/bin/python agent/train_bc.py --series bc1 --epochs 5
+agent/.venv/bin/python agent/train_bc.py --series bc1 --resume             # reprise après interruption
+scripts/run-eval.sh eval-bc --agent policy --checkpoint runs/bc1/ckpt/best.pt --episodes 40
+agent/.venv/bin/python agent/run_demo.py --agent policy --checkpoint runs/bc1/ckpt/best.pt   # sur /live
+```
 
-Aucun ne gagne encore : c'est la référence que l'apprentissage devra battre.
+**Données.** Des Nations (Hard, Impossible, Medium) jouent entre elles ; pour
+4 d'entre elles par partie, on enregistre l'observation qu'aurait un agent à
+leur place et leur décision, traduite dans notre espace d'actions
+(`env/src/nationTap.ts`, sans toucher au moteur : on enveloppe le `tick()` des
+`NationExecution` observées et `game.addExecution()`, et on compare leurs
+alliances avant et après pour les acceptations et ruptures, qui ne passent pas
+par une exécution). Une collecte de 10 minutes sur 4 processus donne environ
+70 000 échantillons (shards `.npz` compressés, ~5 Ko par échantillon) :
+
+- une Nation décide quelque chose dans ~14 % des pas de 10 ticks, « rien » le reste du temps ;
+- 96 % de ces décisions se traduisent dans notre espace (le reste : améliorations de structures, bombes) ;
+- 77 % des décisions traduites respectent nos masques : attaques 86 %,
+  constructions 78 %, alliances 99 %, mais bateaux 24 % seulement (nos
+  masques ne proposent que les 8 cases côtières les plus proches) ;
+- les pas « rien » sont gardés à 10 % (poids 10) pour ne pas noyer les décisions.
+
+**Réseau** (`agent/openfront_ai/model.py`, 1,7 M paramètres) : CNN sur la
+grille (sa carte finale est à la résolution de la grille d'actions), petit
+transformer sur la table des joueurs, MLP sur les scalaires ; têtes
+factorisées masquées (type, cible par pointeur sur la table, case, quantité,
+unité) et tête de valeur pour la suite (PPO).
+
+**Entraînement** (`agent/train_bc.py`) : entropie croisée masquée par tête,
+types repondérés en 1/√fréquence (plafond 10), un shard sur dix en
+validation, pertes et précisions dans le tableau de bord, checkpoints
+`runs/<série>/ckpt/{last,best}.pt` après chaque shard (reprise avec
+`--resume`). 5 époques sur 82 000 échantillons : 21 min sur le GPU du Mac
+(MPS). Précision de validation : type 56 %, cible 92 %, quantité 64 %,
+unité 82 %, case 21 % (parmi 512).
+
+![Courbes d'entraînement](docs/dashboard-bc.png)
+
+`PolicyAgent` charge un checkpoint, décode les têtes l'une après l'autre en
+respectant les masques (échantillonnage, ou `--greedy`), et envoie ses
+probabilités à `/live`.
+
+![Politique apprise sur /live](docs/live-politique.png)
+
+## Agents de référence et résultats
+
+40 épisodes FFA World Compact, 1 siège contre 7 Nations Medium, mêmes graines
+pour tous (`run_eval.py --episodes 40 --seed evalbc`) :
+
+| Agent | Victoires | Rang moyen | Top 3 | Part de territoire finale | Durée de vie moyenne |
+|---|---|---|---|---|---|
+| aléatoire (dans les masques) | 0 % | 7,75 / 8 | 0 % | 0,0 % | 2 300 ticks |
+| à règles (terres neutres, voisin le plus faible, villes) | 0 % | 5,15 / 8 | 30 % | 3,0 % | 6 200 ticks |
+| imitation des Nations (échantillonnage) | **15 %** | 4,50 / 8 | 38 % | **13,6 %** | 7 600 ticks |
+| imitation des Nations (greedy) | 0 % | **4,05 / 8** | 40 % | 4,0 % | 10 400 ticks |
+
+L'agent imité gagne 6 parties sur 40 en échantillonnant (l'une à 80 % du
+territoire dès le tick 6 541, vérifiée par rejeu headless). En greedy, il
+survit plus longtemps mais ne prend plus l'initiative qui fait gagner.
 
 ## Performances
 
@@ -332,7 +392,12 @@ par processus, pas de 10 ticks, mesures de 45 s, Mac 4 cœurs performance +
 | | 8 | 1 749 | 3 620 |
 
 Le processus Python passe ~90 % de son temps à attendre les serveurs : la
-limite vient du calcul côté serveur. Au-delà de 4 processus, les cœurs
+limite vient du calcul côté serveur. Sur une série de plusieurs minutes, le
+débit baisse d'environ un tiers puis se stabilise : ce n'est pas une fuite
+(tas stable après GC, pas de baisse dans un processus seul), mais un effet de
+population, les parties encore en cours étant surtout les longues, plus
+coûteuses par pas, et chaque pas du lot attendant la plus lente.
+`throughput.jsonl` donne aussi `server_ms_per_step`. Au-delà de 4 processus, les cœurs
 efficacité apportent peu, et chaque pas attend la partie la plus lente du
 lot. Par pas et par siège, côté serveur (`cd env && npx tsx src/bench.ts`) :
 simulation ~1,5 ms par partie, masques ~0,6 ms par siège (les tests de bateau
