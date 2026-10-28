@@ -56,10 +56,22 @@ def main() -> None:
     parser.add_argument("--map", default="world")
     parser.add_argument("--seed", default="eval", help="préfixe des graines de partie")
     parser.add_argument("--port", type=int, default=5555)
+    parser.add_argument("--record", metavar="SERIE", help="enregistre les parties dans runs/SERIE/")
+    parser.add_argument("--record-every", type=int, default=1, help="n'enregistre qu'une partie sur N")
+    parser.add_argument("--record-to-end", action="store_true", help="après la fin de l'agent, joue la partie jusqu'au vainqueur avant d'enregistrer")
     args = parser.parse_args()
 
     names = ["random", "rule"] if args.agent == "both" else [args.agent]
-    env = OpenFrontEnv(agents=args.agents, nations=args.nations, difficulty=args.difficulty, map=args.map, port=args.port)
+    env = OpenFrontEnv(
+        agents=args.agents,
+        nations=args.nations,
+        difficulty=args.difficulty,
+        map=args.map,
+        port=args.port,
+        record=args.record,
+        record_every=args.record_every,
+        record_to_end=args.record_to_end,
+    )
     try:
         for name in names:
             games = []
