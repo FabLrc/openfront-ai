@@ -357,6 +357,42 @@ probabilités à `/live`.
 
 ![Politique apprise sur /live](docs/live-politique.png)
 
+## Renforcement (PPO)
+
+À partir de la politique imitée, contre 7 Nations :
+
+```bash
+scripts/train-ppo.sh ppo1 4 30     # 4 h en segments de 30 min, évaluation après chaque segment
+agent/.venv/bin/python agent/train_ppo.py --series ppo1 --minutes 30   # un segment (reprise automatique)
+```
+
+- `agent/openfront_ai/ppo.py` : la probabilité d'une action est le produit des
+  têtes utilisées par son type (cible pour spawn, attaque, alliance et
+  rupture ; quantité pour attaque et bateau ; unité pour construction ; case
+  pour bateau et construction) ; entropie et KL suivent la même règle. GAE.
+- `agent/train_ppo.py` : rollouts de 128 pas sur 16 parties (4 processus ×
+  4 parties), 3 époques de mini-lots de 512, objectif tronqué (0,2), bonus
+  d'entropie, avantages normalisés. Les sièges inactifs (partie en
+  réinitialisation) sont ignorés.
+- Départ depuis `runs/bc1/ckpt/best.pt`. Pénalité KL(π‖π_imitée) vers la
+  politique imitée gelée, coefficient 0,5 décroissant jusqu'à 0 en 300 mises à
+  jour ; 5 premières mises à jour sur la tête de valeur seule ; les deux
+  premières convolutions restent gelées (leur rétropropagation coûtait ~2/3 de
+  la mise à jour sur le GPU du Mac).
+- Curriculum : Medium → Hard → Impossible quand le taux de victoire glissant
+  (50 épisodes) atteint 50 %. Shaping de territoire 0,5 décroissant jusqu'à 0.
+- Checkpoint à chaque mise à jour (`runs/<série>/ckpt/last.pt`, copie toutes
+  les 25) ; relancer la commande reprend où on en était. Une partie sur 50 est
+  enregistrée (`/games`).
+- Tableau de bord : récompense, victoires, rang, pertes, entropie, KL,
+  décisions/s, difficulté, et les évaluations à graines fixes (`eval_medium_*`,
+  `eval_hard_*`) écrites par `scripts/train-ppo.sh`.
+- Sur un PC avec GPU NVIDIA (Windows + WSL2) : voir [docs/pc-windows.md](docs/pc-windows.md).
+  CUDA est choisi automatiquement et toutes les couches sont alors entraînées.
+- `/live` : chaque processus d'une série sert sa page sur le port 7100 + i ;
+  la page `/live` du serveur principal les propose dans « Source » et suit
+  automatiquement une série en cours si rien ne tourne sur ce serveur.
+
 ## Agents de référence et résultats
 
 40 épisodes FFA World Compact, 1 siège contre 7 Nations Medium, mêmes graines

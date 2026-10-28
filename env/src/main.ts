@@ -11,6 +11,7 @@
 import { parseArgs } from "node:util";
 import { listSeries, readSeries, renderDashboard } from "./dashboard";
 import { renderGamesPage } from "./gamesPage";
+import { liveSources } from "./liveSources";
 import { LiveHub } from "./live";
 import { DEFAULT_API_PORT, startReplayApi } from "./replayApi";
 import { startEnvServer } from "./server";
@@ -43,6 +44,7 @@ if (httpPort > 0) {
     "/api/series": () => ({ json: listSeries() }),
     "/api/metrics": (url) => ({ json: readSeries(url.searchParams.get("series") ?? "") }),
     "/games": () => renderGamesPage(values["viewer-url"]),
+    "/api/live-sources": () => ({ json: liveSources(httpPort) }),
   });
   log(`Tableau de bord : http://localhost:${httpPort}/`);
   log(`Partie en direct : http://localhost:${httpPort}/live`);

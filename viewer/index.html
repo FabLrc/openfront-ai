@@ -59,13 +59,14 @@
   <span class="stat">Tick <b id="tick">—</b></span>
   <span class="stat">Vitesse <b id="tps">—</b> ticks/s</span>
   <span class="stat" id="conn">connexion…</span>
+  <label class="stat">Source <select id="source"><option value="">ce serveur</option></select></label>
   <div class="speed" id="speed">
     <button data-v="1">x1</button><button data-v="10">x10</button><button data-v="max">max</button>
   </div>
 </header>
 <main>
   <div id="wrap">
-    <div id="empty">En attente d'une partie (lancez un agent).</div>
+    <div id="empty">En attente d'une partie. Lancez par exemple<br><code>agent/.venv/bin/python agent/run_demo.py --agent rule</code><br>ou choisissez une série en cours dans « Source ».</div>
     <canvas id="c" hidden></canvas>
   </div>
   <aside>
@@ -293,14 +294,39 @@ function renderAgents(agents, players) {
 }
 
 let ws;
+// Source suivie : ce serveur, ou la page /live d'un processus d'une série parallèle.
+let sourcePort = new URLSearchParams(location.search).get("source") ?? "";
+let gotMap = false;
+async function refreshSources() {
+  try {
+    const list = await (await fetch("/api/live-sources")).json();
+    const sel = $("source");
+    sel.innerHTML = '<option value="">ce serveur</option>' + list.map((s) => `<option value="${s.http_port}">${esc(s.label)}</option>`).join("");
+    sel.value = sourcePort;
+    // Rien sur ce serveur mais une série tourne : on la suit.
+    if (!gotMap && sourcePort === "" && list.length > 0) switchSource(String(list[0].http_port));
+  } catch { /* ancienne version du serveur */ }
+}
+function switchSource(port) {
+  sourcePort = port;
+  history.replaceState(null, "", port ? `?source=${port}` : location.pathname);
+  units.clear(); view = null; base = null; gotMap = false;
+  if (ws) { ws.onclose = null; ws.close(); }
+  connect();
+}
+$("source").addEventListener("change", (e) => switchSource(e.target.value));
+setTimeout(refreshSources, 1500);
+setInterval(refreshSources, 10000);
+
 function connect() {
-  ws = new WebSocket(`ws://${location.host}/ws`);
+  ws = new WebSocket(`ws://${sourcePort ? `${location.hostname}:${sourcePort}` : location.host}/ws`);
   // Les messages sont traités dans l'ordre (la décompression est asynchrone).
   let chain = Promise.resolve();
   ws.onopen = () => { $("conn").textContent = "connecté"; };
   ws.onclose = () => { $("conn").textContent = "déconnecté"; setTimeout(connect, 1000); };
   ws.onmessage = (e) => {
     const msg = JSON.parse(e.data);
+    if (msg.type === "map") gotMap = true;
     chain = chain.then(() => (msg.type === "map" ? onMap(msg) : onFrame(msg)));
   };
 }

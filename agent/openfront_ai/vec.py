@@ -16,8 +16,11 @@ from __future__ import annotations
 import json
 import os
 import platform
+import signal
 import socket
 import subprocess
+import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,12 +36,27 @@ RUNS_DIR = Path(os.environ.get("OPENFRONT_RUNS_DIR", ROOT / "runs"))
 
 
 def performance_cores() -> int:
-    """Nombre de cœurs performance (macOS), sinon la moitié des cœurs."""
+    """Cœurs performance (macOS) ou cœurs physiques (Linux, WSL), sinon la moitié des cœurs logiques."""
     if platform.system() == "Darwin":
         try:
             out = subprocess.run(["sysctl", "-n", "hw.perflevel0.physicalcpu"], capture_output=True, text=True, check=True)
             return max(1, int(out.stdout.strip()))
         except (OSError, ValueError, subprocess.CalledProcessError):
+            pass
+    if platform.system() == "Linux":
+        try:
+            cores = set()
+            physical = core = None
+            for line in Path("/proc/cpuinfo").read_text().splitlines():
+                key, _, value = line.partition(":")
+                if key.strip() == "physical id":
+                    physical = value.strip()
+                elif key.strip() == "core id":
+                    core = value.strip()
+                    cores.add((physical, core))
+            if cores:
+                return len(cores)
+        except OSError:
             pass
     return max(1, (os.cpu_count() or 2) // 2)
 
@@ -63,9 +81,22 @@ def _port_open(port: int) -> bool:
 class ServerPool:
     """Processus serveur d'environnement (env/src/main.ts) lancés localement."""
 
-    def __init__(self, n: int | None = None, base_port: int = 6000, dashboard: bool = True, verbose: bool = False):
+    def __init__(
+        self,
+        n: int | None = None,
+        base_port: int = 6000,
+        dashboard: bool = True,
+        verbose: bool = False,
+        label: str = "série",
+        live_base_port: int = 7100,  # 7000 : récepteur AirPlay de macOS
+    ):
+        """``label`` nomme ces processus dans le sélecteur de /live : chacun sert
+        sa propre page /live sur ``live_base_port + i`` (si le port est libre),
+        enregistrée dans runs/live-sources.json pour le serveur principal."""
         self.n = n or performance_cores()
         self.ports = [base_port + i for i in range(self.n)]
+        self.label = label
+        self.live: list[dict[str, Any]] = []
         env_dir = ROOT / "env"
         tsx = env_dir / "node_modules" / ".bin" / "tsx"
         path = os.environ.get("PATH", "")
@@ -78,8 +109,10 @@ class ServerPool:
                 self.close()
                 raise EnvError(f"port {port} déjà utilisé")
             first = i == 0 and dashboard
-            http = 8080 if first and _port_free(8080) else 0
+            http = 8080 if first and _port_free(8080) else live_base_port + i if _port_free(live_base_port + i) else 0
             api = 8787 if first and _port_free(8787) else 0
+            if http:
+                self.live.append({"label": f"{label} · processus {i + 1}", "http_port": http, "env_port": port})
             cmd = [str(tsx), "src/main.ts", "--port", str(port), "--http-port", str(http), "--api-port", str(api)]
             out = None if verbose else subprocess.DEVNULL
             self.procs.append(subprocess.Popen(cmd, cwd=env_dir, env=env, stdout=out, stderr=out))
@@ -90,8 +123,40 @@ class ServerPool:
                     self.close()
                     raise EnvError(f"le serveur du port {port} n'a pas démarré")
                 time.sleep(0.1)
+        for entry, proc in zip(self.live, self.procs):
+            entry["pid"] = proc.pid
+        self._register(add=True)
+        # Arrêt par SIGTERM (kill) : sortir proprement pour arrêter aussi les
+        # serveurs, au lieu de les laisser orphelins.
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+
+    def _register(self, add: bool) -> None:
+        """Ajoute ou retire nos pages /live dans runs/live-sources.json."""
+        path = RUNS_DIR / "live-sources.json"
+        try:
+            entries = json.loads(path.read_text()) if path.exists() else []
+        except (OSError, json.JSONDecodeError):
+            entries = []
+        mine = {e["http_port"] for e in self.live}
+
+        def alive(pid) -> bool:
+            try:
+                os.kill(int(pid), 0)
+                return True
+            except (OSError, TypeError, ValueError):
+                return False
+
+        # On retire aussi les entrées de processus disparus (série interrompue).
+        entries = [e for e in entries if e.get("http_port") not in mine and alive(e.get("pid"))]
+        if add:
+            entries += self.live
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(entries, ensure_ascii=False, indent=1))
 
     def close(self) -> None:
+        if self.procs:
+            self._register(add=False)
         for p in self.procs:
             p.terminate()
         for p in self.procs:

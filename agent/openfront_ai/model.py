@@ -106,4 +106,11 @@ def load_checkpoint(path, device: torch.device | str = "cpu") -> tuple[PolicyNet
 
 
 def best_device() -> torch.device:
+    """GPU NVIDIA (CUDA), sinon GPU du Mac (MPS), sinon CPU ; OPENFRONT_DEVICE force un choix."""
+    import os
+
+    if os.environ.get("OPENFRONT_DEVICE"):
+        return torch.device(os.environ["OPENFRONT_DEVICE"])
+    if torch.cuda.is_available():
+        return torch.device("cuda")
     return torch.device("mps" if torch.backends.mps.is_available() else "cpu")
