@@ -14,7 +14,7 @@ import { simpleHash } from "@openfront/engine-lib/Util";
 import { Player } from "@openfront/engine/game/Game";
 import { GameState, OpenFrontGame, ResetConfig } from "./game";
 import { Buffers } from "./protocol";
-import { IndexEntry, RecordOptions, shouldRecord, writeRecord } from "./records";
+import { appendMetrics, IndexEntry, RecordOptions, shouldRecord, writeRecord } from "./records";
 import {
   ACTION_TYPES,
   AMOUNTS,
@@ -42,6 +42,21 @@ export interface EnvConfig extends ResetConfig, Partial<SeatOptions> {
   maxTicks?: number;
   /** Enregistrement des parties (runs/<run>/games) ; absent : pas d'enregistrement. */
   record?: RecordOptions;
+  /** Série de métriques : une ligne par siège fini dans runs/<series>/metrics.jsonl. */
+  series?: string;
+}
+
+/** Compteurs d'un siège sur l'épisode, pour les métriques. */
+interface SeatStats {
+  steps: number;
+  reward: number;
+  actions: Record<string, number>;
+  /** Actions envoyées mais refusées par le moteur, par type. */
+  refused: Record<string, number>;
+  /** Actions hors masque (remplacées par « rien »). */
+  invalid: number;
+  /** Bateaux annulés car leur masque en cache était périmé. */
+  stale: number;
 }
 
 export interface StepResult {
@@ -65,6 +80,7 @@ export class AgentEnv {
   /** Bilan de chaque siège à sa fin (rang, victoire). */
   private outcomes = new Map<string, { rank: number; players: number; won: boolean }>();
   private recording: boolean;
+  private stats = new Map<string, SeatStats>();
   /** Entrée d'index une fois la partie écrite. */
   recorded: IndexEntry | null = null;
 
@@ -92,7 +108,10 @@ export class AgentEnv {
   }
 
   reset(): StepResult {
-    for (const s of this.seats) this.prevShare.set(s.name, 0);
+    for (const s of this.seats) {
+      this.prevShare.set(s.name, 0);
+      this.stats.set(s.name, { steps: 0, reward: 0, actions: {}, refused: {}, invalid: 0, stale: 0 });
+    }
     return this.result(new Map(), new Set());
   }
 
@@ -104,6 +123,7 @@ export class AgentEnv {
     const g = this.game;
     const intents: StampedIntent[] = [];
     const invalid = new Set<string>();
+    const sent = new Map<string, number>();
     for (const seat of this.seats) {
       if (!this.active.has(seat.name)) continue;
       seat.annotations = annotations[seat.name];
@@ -113,7 +133,18 @@ export class AgentEnv {
       }
       if (action[0] !== T_NOOP && !seat.isValid(action)) invalid.add(seat.name);
       const intent = seat.toIntent(action);
-      if (intent !== null) intents.push(intent);
+      if (intent !== null) {
+        intents.push(intent);
+        sent.set(seat.name, action[0]);
+      }
+      const st = this.stats.get(seat.name)!;
+      st.steps++;
+      if (action[0] !== T_NOOP) {
+        const t = ACTION_TYPES[action[0]] ?? String(action[0]);
+        st.actions[t] = (st.actions[t] ?? 0) + 1;
+        if (invalid.has(seat.name)) st.invalid++;
+        else if (seat.lastStale) st.stale++;
+      }
     }
 
     if (g.game.inSpawnPhase()) {
@@ -125,7 +156,15 @@ export class AgentEnv {
 
     const accepted = new Map<string, boolean | null>();
     for (const seat of this.seats) {
-      if (this.active.has(seat.name)) accepted.set(seat.name, seat.resolvePending());
+      if (!this.active.has(seat.name)) continue;
+      const ok = seat.resolvePending();
+      accepted.set(seat.name, ok);
+      const type = sent.get(seat.name);
+      if (ok === false && type !== undefined) {
+        const st = this.stats.get(seat.name)!;
+        const t = ACTION_TYPES[type];
+        st.refused[t] = (st.refused[t] ?? 0) + 1;
+      }
     }
 
     for (const p of g.game.allPlayers()) {
@@ -196,6 +235,7 @@ export class AgentEnv {
         gold: Number(p.gold()),
         accepted: accepted.get(seat.name) ?? null,
         invalid: invalid.has(seat.name),
+        stale: seat.lastStale,
         last_action: seat.lastAction,
       };
       if (over) {
@@ -214,7 +254,29 @@ export class AgentEnv {
       terminations[seat.name] = over && !truncated;
       truncations[seat.name] = truncated;
       infos[seat.name] = info;
-      if (over) this.active.delete(seat.name);
+      const st = this.stats.get(seat.name)!;
+      st.reward += reward;
+      if (over) {
+        this.active.delete(seat.name);
+        if (this.config.series) {
+          appendMetrics(this.config.series, {
+            date: new Date().toISOString(),
+            gameID: this.game.gameID,
+            seed: this.game.config.seed,
+            map: this.game.config.map,
+            agents: this.seats.length,
+            nations: this.game.config.nations,
+            agent: seat.name,
+            won: info.won,
+            rank: info.rank,
+            players: info.players,
+            share,
+            ticks: g.ticks(),
+            truncated,
+            ...st,
+          });
+        }
+      }
     }
     if ((this.seats.length > 0 && this.active.size === 0) || state.done) this.finish();
     return {
