@@ -77,7 +77,7 @@ Autres commandes :
 cd env && npx tsx src/selfplay.ts --seed demo     # partie complète sans agent ni serveur
 cd env && npm test                                # tests vitest
 cd env && npm run typecheck                       # tsc --noEmit
-agent/.venv/bin/python -m unittest discover -s agent/tests   # dont le test d'API PettingZoo (serveur lancé)
+agent/.venv/bin/python -m pytest agent/tests   # dont le test d'API PettingZoo (serveur lancé)
 cd env && npx tsx src/bench.ts --agents 1 --policy rule   # débit et coût par phase
 ```
 
@@ -141,9 +141,15 @@ l'alliance. Une action masquée est remplacée par « rien » (`info["invalid"]`
 `info["accepted"]` indique si le moteur a réellement exécuté l'action. Le
 moteur juge une intention un tick après l'observation : il reste de rares
 refus (moins de 0,5 %, sur les tests) quand un front, une tuile ou un trajet
-par l'eau disparaît entre-temps. Pour
-limiter le coût, seules les 8 cases côtières les plus proches sont testées
-pour les bateaux (paramètre `boatCandidates` ; chaque test coûte ~0,07 ms).
+par l'eau disparaît entre-temps.
+
+Pour limiter le coût, seules les 8 cases côtières les plus proches sont
+proposées pour les bateaux (`boatCandidates`). Les tests coûteux (trajet par
+l'eau pour un bateau, emplacement d'une construction) sont gardés en cache
+5 pas (`boatCacheSteps`, `buildCacheSteps`), avec un nombre limité de
+nouveaux tests par pas (`boatChecksPerStep`, `buildChecksPerStep`). L'action
+choisie est revérifiée avant l'envoi : si son verdict en cache est périmé,
+elle est remplacée par « rien » (`info["stale"]`).
 
 ### Récompense
 
@@ -178,6 +184,60 @@ La page `/live` reçoit par WebSocket (`/ws`), environ 5 fois par seconde, le
 propriétaire de chaque tuile d'une carte sous-échantillonnée (au plus 1000
 pixels de côté, `Uint16Array` compressé en deflate), la liste des joueurs et
 l'état des sièges d'agents. Elle affiche la dernière partie lancée.
+
+## Exécution parallèle et tableau de bord
+
+![Tableau de bord pendant une série](docs/dashboard.png)
+
+```bash
+scripts/run-eval.sh regles --minutes 10               # agent à règles, 1 siège contre 7 Nations
+scripts/run-eval.sh regles8 --agents 8 --nations 0 --procs 4 --games-per-proc 2
+```
+
+Le script lance des processus serveur d'environnement (un par cœur
+performance par défaut, `--procs`), chacun avec plusieurs parties
+(`--games-per-proc`), et un agent de référence dans chaque siège. Le premier
+processus sert le tableau de bord sur <http://localhost:8080/> si le port est
+libre (sinon, lancer `cd env && npm start` à côté). Chaque épisode est borné à
+`--max-ticks` (30 000 par défaut) : au-delà, la partie s'arrête avec un
+classement par territoire, pour qu'une partie enlisée ne bloque pas une série.
+
+En Python :
+
+```python
+from openfront_ai.vec import ServerPool, VecOpenFrontEnv
+
+with ServerPool(4) as pool:                       # 4 processus (ports 6000…)
+    env = VecOpenFrontEnv(pool.ports, games_per_server=2, agents=1, nations=7,
+                          max_ticks=30000, series="essai")
+    obs, infos = env.reset()                      # obs["spatial"] : [B, 13, 64, 128]…
+    while True:
+        actions = policy(obs, env.active)         # [B, 5] ; seuls les sièges actifs comptent
+        obs, rewards, terminated, truncated, infos = env.step(actions)
+```
+
+`B` = parties × sièges. Toutes les requêtes partent avant que les réponses
+soient lues : les processus calculent en même temps. Une partie dont tous les
+sièges ont fini est réinitialisée aussitôt (nouvelle graine) ; `infos[b]`
+garde alors le bilan de l'épisode (`rank`, `won`…) et `infos[b]["reset"]`
+celui de la nouvelle partie.
+
+### Métriques
+
+Dans `runs/<série>/` :
+
+- `metrics.jsonl`, une ligne par siège fini : victoire, rang, part de
+  territoire finale, durée, troncature, récompense totale, nombre d'actions par
+  type, refus du moteur par type, actions hors masque, actions annulées
+  (masque en cache périmé) ;
+- `throughput.jsonl`, toutes les 10 s : décisions/s et ticks/s cumulés ;
+- `train.jsonl`, libre : `openfront_ai.vec.log_train("serie", step=…, loss=…,
+  entropy=…)`. Le tableau de bord trace une courbe par champ numérique.
+
+Le tableau de bord (<http://localhost:8080/>, rafraîchi toutes les 3 s)
+montre, pour la série choisie, le taux de victoire et le rang moyen glissants,
+la récompense et la durée par épisode, le débit, et les métriques
+d'entraînement s'il y en a. Il renvoie vers `/live` et `/games`.
 
 ## Enregistrement des parties et replays
 
@@ -258,14 +318,23 @@ Aucun ne gagne encore : c'est la référence que l'apprentissage devra battre.
 Mac 10 cœurs. Le moteur seul joue une partie World Compact à 8 Nations
 (~13 500 ticks) à environ 6 400 ticks/s.
 
-Avec des sièges d'agents (pas de 10 ticks, `src/bench.ts`, sans socket) :
+Débit cumulé avec `VecOpenFrontEnv` (Python compris, agent à règles, 2 parties
+par processus, pas de 10 ticks, mesures de 45 s, Mac 4 cœurs performance +
+6 cœurs efficacité) :
 
-| Configuration | Pas/s | Ticks/s | Coût par pas |
+| Configuration | Processus | Décisions/s | Ticks/s |
 |---|---|---|---|
-| 1 agent + 7 Nations | ~250 | ~2 500–3 000 | simulation 1,5 ms, masques 0,6–1,6 ms, comptage de la carte 0,9 ms, observation 0,2 ms |
-| 8 agents, sans Nation | ~70 | ~700 | simulation 1,7 ms, masques 10,6 ms (dont bateaux 8 ms), observation 1,5 ms |
+| 1 agent + 7 Nations, Compact | 1 | 283 | 2 887 |
+| | 4 | 635 | 6 512 |
+| | 8 | 631 | 6 463 |
+| 8 agents, Compact | 1 | 701 | 1 403 |
+| | 4 | 1 522 | 3 097 |
+| | 8 | 1 749 | 3 620 |
 
-Depuis Python (socket, sérialisation, politique), compter environ 100 pas/s
-pour 1 agent. Le poste le plus cher est le masque des bateaux (recherches de
-chemin sur l'eau, ~0,1 ms par case testée) : `boatCandidates: 4` donne ~90 pas/s
-à 8 agents.
+Le processus Python passe ~90 % de son temps à attendre les serveurs : la
+limite vient du calcul côté serveur. Au-delà de 4 processus, les cœurs
+efficacité apportent peu, et chaque pas attend la partie la plus lente du
+lot. Par pas et par siège, côté serveur (`cd env && npx tsx src/bench.ts`) :
+simulation ~1,5 ms par partie, masques ~0,6 ms par siège (les tests de bateau
+et de construction sont gardés en cache 5 pas et revérifiés avant envoi),
+comptage de la carte ~0,9 ms par partie, observation ~0,2 ms par siège.
