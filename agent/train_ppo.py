@@ -120,7 +120,9 @@ def main() -> None:
     value_params = {id(q) for q in model.value_head.parameters()}
     opt = torch.optim.Adam(trainable, lr=args.lr, eps=1e-5)
     state = {"update": 0, "decisions": 0, "difficulty": DIFFICULTIES.index(args.difficulty), "seconds": 0.0, "episodes": 0}
-    window: deque = deque(maxlen=args.window)
+    # Historique plus long que la fenêtre : avec le curriculum mélangé, les
+    # `window` dernières parties du niveau courant doivent y tenir.
+    window: deque = deque(maxlen=4 * args.window)
     if resume:
         try:
             opt.load_state_dict(ckpt["optimizer"])
@@ -262,7 +264,7 @@ def main() -> None:
                 # ── Curriculum, journal, checkpoint ──
                 state["update"] = u + 1
                 state["seconds"] = seconds0 + time.monotonic() - start
-                current = [w for w in window if w["difficulty"] == state["difficulty"]]
+                current = [w for w in window if w["difficulty"] == state["difficulty"]][-args.window :]
                 win_rate = float(np.mean([w["won"] for w in current])) if current else 0.0
                 promoted = False
                 if len(current) >= args.window and win_rate >= args.promote and state["difficulty"] < len(DIFFICULTIES) - 1:
