@@ -29,7 +29,10 @@ export function startEnvServer(port: number, hub: LiveHub): net.Server {
     const handle = async ({ header: req }: Frame): Promise<void> => {
       switch (req.cmd) {
         case "reset": {
-          if (env !== null) hub.detach(env.game);
+          if (env !== null) {
+            env.finish();
+            hub.detach(env.game);
+          }
           env = await AgentEnv.create((req.config ?? {}) as EnvConfig);
           const current = env;
           hub.attach(env.game, () => current.displays());
@@ -88,7 +91,12 @@ export function startEnvServer(port: number, hub: LiveHub): net.Server {
       }
     });
     socket.on("close", () => {
-      if (env !== null) hub.detach(env.game);
+      if (env === null) return;
+      // Partie abandonnée en cours : on l'enregistre telle quelle.
+      queue = queue.then(() => {
+        env?.finish();
+      });
+      hub.detach(env.game);
     });
     socket.on("error", () => {});
   });

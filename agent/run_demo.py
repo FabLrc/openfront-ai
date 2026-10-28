@@ -18,7 +18,10 @@ from openfront_ai.env import ACTION_TYPES
 
 def run_nations(args: argparse.Namespace) -> None:
     with EnvClient(port=args.port, timeout=None) as env:
-        header, _ = env.reset(map=args.map, size=args.size, nations=args.nations, difficulty=args.difficulty, seed=args.seed)
+        config = {"map": args.map, "size": args.size, "nations": args.nations, "difficulty": args.difficulty, "seed": args.seed}
+        if args.record:
+            config["record"] = {"run": args.record}
+        header, _ = env.reset(**config)
         state = header["state"]
         print(f"Partie lancée : {args.map} {args.size}, {state['alivePlayers']} joueurs, tick {state['tick']}")
         last_report = 0
@@ -34,7 +37,17 @@ def run_nations(args: argparse.Namespace) -> None:
 
 def run_agent(args: argparse.Namespace) -> None:
     agent = (RuleAgent if args.agent == "rule" else RandomAgent)(seed=0)
-    env = OpenFrontEnv(agents=1, nations=args.nations - 1, map=args.map, size=args.size, difficulty=args.difficulty, ticks_per_step=args.ticks, port=args.port)
+    env = OpenFrontEnv(
+        agents=1,
+        nations=args.nations - 1,
+        map=args.map,
+        size=args.size,
+        difficulty=args.difficulty,
+        ticks_per_step=args.ticks,
+        port=args.port,
+        record=args.record,
+        record_to_end=True,
+    )
     try:
         obs, _ = env.reset(seed=args.seed)
         print(f"Partie lancée : {args.map} {args.size}, agent « {args.agent} » contre {args.nations - 1} Nations")
@@ -65,6 +78,7 @@ def main() -> None:
     parser.add_argument("--ticks", type=int, default=10, help="ticks par pas")
     parser.add_argument("--agent", choices=["random", "rule"], help="un siège joué par cet agent")
     parser.add_argument("--port", type=int, default=5555)
+    parser.add_argument("--record", metavar="SERIE", help="enregistre la partie dans runs/SERIE/")
     args = parser.parse_args()
     start = time.perf_counter()
     (run_agent if args.agent else run_nations)(args)

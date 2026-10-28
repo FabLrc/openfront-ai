@@ -21,9 +21,12 @@ import {
 } from "@openfront/engine-api/game/GameUpdates";
 import {
   ClientID,
+  GAME_ID_REGEX,
   GameConfig,
   GameStartInfo,
   StampedIntent,
+  Turn,
+  Winner,
 } from "@openfront/engine-api/Schemas";
 import { loadTerrainMap } from "@openfront/engine-lib/game/TerrainMapLoader";
 import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
@@ -35,6 +38,9 @@ import { createGame } from "@openfront/engine/game/GameImpl";
 import { createNationsForGame } from "@openfront/engine/game/NationCreation";
 import { GameRunner } from "@openfront/engine/GameRunner";
 import { loadMapFiles } from "@openfront/shared/GameMapLoader";
+import { createPartialGameRecord } from "@openfront/shared/SharedUtil";
+import { GameRecord, PlayerRecord } from "@openfront/shared/WireSchemas";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { NodeGameMapLoader } from "./NodeGameMapLoader";
@@ -44,6 +50,18 @@ const MAPS_DIR = path.resolve(
   "../../openfront/resources/maps",
 );
 const MAX_SPAWN_TURNS = 1000;
+/** Commit d'OpenFrontIO du sous-module, inscrit dans les records (le lecteur officiel le vérifie hors build DEV). */
+export const OPENFRONT_COMMIT = "d1f236242864f506a040f2d56cc5ddd41bf27612";
+
+/**
+ * Identifiant de partie dérivé de la graine. Le lecteur de replays n'accepte
+ * que 8 à 10 caractères alphanumériques (GAME_ID_REGEX) ; une graine qui n'en
+ * est pas un est remplacée par les 10 premiers caractères de son SHA-1.
+ * L'identifiant initialise les tirages du moteur : il fait partie de la partie.
+ */
+export function gameIDFromSeed(seed: string): string {
+  return GAME_ID_REGEX.test(seed) ? seed : createHash("sha1").update(seed).digest("hex").slice(0, 10);
+}
 
 export interface ResetConfig {
   /** Nom de carte insensible à la casse, ex. "world", "europe". */
@@ -112,13 +130,17 @@ export class OpenFrontGame {
   private runner: GameRunner;
   private executor: TrackingExecutor;
   readonly seats: Player[];
+  /** Tous les Turns joués, avec le hash publié par le moteur à leur tick. */
+  readonly turns: Turn[] = [];
+  readonly startedAt = Date.now();
 
   private constructor(
     readonly config: Required<ResetConfig>,
     readonly game: Game,
-    gameID: string,
+    readonly gameStart: GameStartInfo,
     seatClientIDs: ClientID[],
   ) {
+    const gameID = gameStart.gameID;
     this.executor = new TrackingExecutor(game, gameID, undefined);
     this.runner = new GameRunner(game, this.executor, (gu) => {
       if ("errMsg" in gu) {
@@ -126,8 +148,10 @@ export class OpenFrontGame {
         return;
       }
       const hashes = gu.updates[GameUpdateType.Hash] as HashUpdate[];
-      if (hashes.length > 0) {
-        this.lastHash = hashes[hashes.length - 1].hash;
+      for (const h of hashes) {
+        this.lastHash = h.hash;
+        const turn = this.turns[h.tick];
+        if (turn !== undefined) turn.hash = h.hash;
       }
     });
     this.runner.init();
@@ -160,7 +184,7 @@ export class OpenFrontGame {
     };
     const seatIDs = Array.from({ length: config.agents }, (_, i) => seatClientID(i));
     const gameStart: GameStartInfo = {
-      gameID: config.seed,
+      gameID: gameIDFromSeed(config.seed),
       lobbyCreatedAt: 0,
       config: gameConfig,
       players: seatIDs.map((clientID, i) => ({
@@ -197,14 +221,16 @@ export class OpenFrontGame {
       new EngineConfig(gameConfig, false),
       terrain.teamGameSpawnAreas,
     );
-    const g = new OpenFrontGame(config, game, gameStart.gameID, seatIDs);
+    const g = new OpenFrontGame(config, game, gameStart, seatIDs);
     // Sans agent, la phase de spawn n'offre aucune décision : on la joue tout de suite.
     if (config.agents === 0) g.finishSpawnPhase();
     return g;
   }
 
   private tick(intents: StampedIntent[] = []): void {
-    this.runner.addTurn({ turnNumber: this.turnNumber++, intents });
+    const turn: Turn = { turnNumber: this.turnNumber++, intents };
+    this.turns.push(turn);
+    this.runner.addTurn(turn);
     this.runner.executeNextTick();
     if (this.fatalError !== undefined) {
       throw new Error(`erreur du moteur au tick ${this.game.ticks()}:\n${this.fatalError}`);
@@ -241,6 +267,43 @@ export class OpenFrontGame {
   /** Appelé pour chaque exécution créée à partir d'une intention. */
   onExecutionCreated(fn: (intent: StampedIntent, exec: Execution) => void): void {
     this.executor.onCreate = fn;
+  }
+
+  get gameID(): string {
+    return this.gameStart.gameID;
+  }
+
+  /**
+   * GameRecord au format officiel (comme GameServer.archiveGame) : rejoué par
+   * le moteur, il redonne la même partie, les Nations étant recréées à
+   * l'identique. Sans vainqueur si la partie n'est pas finie.
+   */
+  toRecord(): GameRecord {
+    const stats = this.game.stats().stats();
+    const players: PlayerRecord[] = this.gameStart.players.map((p) => ({
+      clientID: p.clientID,
+      username: p.username,
+      clanTag: p.clanTag,
+      persistentID: null,
+      stats: stats[p.clientID] ?? {},
+    }));
+    const w = this.game.getWinner();
+    const winner =
+      w === null ? undefined : (this.game as unknown as { makeWinner(w: unknown): Winner }).makeWinner(w);
+    // Tick de jeu = 100 ms : la durée est celle de la partie, pas du calcul.
+    const end = this.startedAt + this.turns.length * 100;
+    const partial = createPartialGameRecord(
+      this.gameID,
+      this.gameStart.config,
+      players,
+      this.turns,
+      this.startedAt,
+      end,
+      winner,
+      // Comme GameStartInfo : les rejeux reconstruisent la partie depuis ces champs.
+      this.gameStart.lobbyCreatedAt,
+    );
+    return { ...partial, gitCommit: OPENFRONT_COMMIT };
   }
 
   state(): GameState {

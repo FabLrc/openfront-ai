@@ -41,7 +41,8 @@ class EnvClient:
 
     def reset(self, **config: Any) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
         """Crée une partie. Clés : map, size, nations, difficulty, seed, agents,
-        obsWidth, obsHeight, actionWidth, actionHeight, k, shaping, autoSpawn, maxTicks."""
+        obsWidth, obsHeight, actionWidth, actionHeight, k, shaping, autoSpawn, maxTicks,
+        record ({"run": ..., "every": N, "playToEnd": bool})."""
         return self.request({"cmd": "reset", "config": config})
 
     def step(
@@ -115,6 +116,9 @@ class OpenFrontEnv(ParallelEnv):
         k: int = 16,
         shaping: float = 1.0,
         max_ticks: int = 0,
+        record: str | None = None,
+        record_every: int = 1,
+        record_to_end: bool = False,
         host: str = "127.0.0.1",
         port: int = 5555,
     ):
@@ -132,6 +136,9 @@ class OpenFrontEnv(ParallelEnv):
             "shaping": shaping,
             "maxTicks": max_ticks,
         }
+        # Enregistrement des parties dans runs/<record>/ (voir env/src/records.ts).
+        if record is not None:
+            self.config["record"] = {"run": record, "every": record_every, "playToEnd": record_to_end}
         self.ticks_per_step = ticks_per_step
         self.possible_agents = [f"agent_{i}" for i in range(agents)]
         self.agents: list[str] = []

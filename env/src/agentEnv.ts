@@ -14,6 +14,7 @@ import { simpleHash } from "@openfront/engine-lib/Util";
 import { Player } from "@openfront/engine/game/Game";
 import { GameState, OpenFrontGame, ResetConfig } from "./game";
 import { Buffers } from "./protocol";
+import { IndexEntry, RecordOptions, shouldRecord, writeRecord } from "./records";
 import {
   ACTION_TYPES,
   AMOUNTS,
@@ -39,6 +40,8 @@ export interface EnvConfig extends ResetConfig, Partial<SeatOptions> {
   autoSpawn?: boolean;
   /** Troncature au-delà de ce tick (0 : jamais). */
   maxTicks?: number;
+  /** Enregistrement des parties (runs/<run>/games) ; absent : pas d'enregistrement. */
+  record?: RecordOptions;
 }
 
 export interface StepResult {
@@ -59,6 +62,11 @@ export class AgentEnv {
   private prevShare = new Map<string, number>();
   private deathTick = new Map<Player, number>();
   private numSpawned = 0;
+  /** Bilan de chaque siège à sa fin (rang, victoire). */
+  private outcomes = new Map<string, { rank: number; players: number; won: boolean }>();
+  private recording: boolean;
+  /** Entrée d'index une fois la partie écrite. */
+  recorded: IndexEntry | null = null;
 
   private constructor(
     readonly game: OpenFrontGame,
@@ -73,6 +81,7 @@ export class AgentEnv {
       (p, i) => new AgentSeat(i, `agent_${i}`, p, this.map, game.config.seed),
     );
     this.active = new Set(this.seats.map((s) => s.name));
+    this.recording = config.record !== undefined && shouldRecord(config.record);
     const byClient = new Map(this.seats.map((s) => [s.player.clientID(), s]));
     game.onExecutionCreated((intent, exec) => byClient.get(intent.clientID)?.attachExecution(exec));
   }
@@ -194,6 +203,7 @@ export class AgentEnv {
         const won = g.getWinner() === p;
         reward += won ? 1 : -1 + (n - rank) / Math.max(1, n - 1);
         Object.assign(info, { rank, players: n, won });
+        this.outcomes.set(seat.name, { rank, players: n, won });
       }
       seat.computeMasks(frame!);
       buffers = { ...buffers, ...seat.observe(frame!, this.numSpawned) };
@@ -206,6 +216,7 @@ export class AgentEnv {
       infos[seat.name] = info;
       if (over) this.active.delete(seat.name);
     }
+    if ((this.seats.length > 0 && this.active.size === 0) || state.done) this.finish();
     return {
       state,
       agents: [...this.active],
@@ -215,6 +226,41 @@ export class AgentEnv {
       infos,
       buffers,
     };
+  }
+
+  /**
+   * Fin de l'épisode (tous les sièges finis, partie terminée, ou partie
+   * abandonnée : nouveau reset, connexion fermée) : écrit le record si cette
+   * partie doit être enregistrée. Sans effet la seconde fois.
+   */
+  finish(): IndexEntry | null {
+    const g = this.game;
+    if (!this.recording || this.recorded !== null || g.turns.length === 0) return this.recorded;
+    // Le moteur force un vainqueur au plus tard à 170 min de jeu.
+    if (this.config.record!.playToEnd && !g.game.inSpawnPhase()) while (!g.done()) g.step(1000);
+    const state = g.state();
+    this.recorded = writeRecord(
+      g.toRecord(),
+      {
+        gameID: g.gameID,
+        date: new Date().toISOString(),
+        map: g.config.map,
+        size: g.config.size,
+        seed: g.config.seed,
+        nations: g.config.nations,
+        agents: this.seats.map((s) => {
+          const { rank, n } = this.rank(s.player);
+          const o = this.outcomes.get(s.name) ?? { rank, players: n, won: false };
+          return { name: s.name, clientID: s.player.clientID()!, ...o };
+        }),
+        winner: state.winner,
+        finished: state.done,
+        ticks: state.tick,
+        turns: g.turns.length,
+      },
+      this.config.record!.run,
+    );
+    return this.recorded;
   }
 
   /** Description des espaces d'observation et d'action, envoyée au reset. */
