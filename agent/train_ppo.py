@@ -93,6 +93,7 @@ def main() -> None:
     p.add_argument("--record-every", type=int, default=50, help="enregistre une partie sur N (0 : aucune)")
     p.add_argument("--snapshot-every", type=int, default=25, help="copie du checkpoint toutes les N mises à jour")
     p.add_argument("--base-port", type=int, default=6400)
+    p.add_argument("--freeze-convs", type=int, default=2, help="premières convolutions gelées (rétropropagation coûteuse sur le GPU du Mac)")
     args = p.parse_args()
 
     device = best_device()
@@ -104,7 +105,14 @@ def main() -> None:
     reference.eval()
     for q in reference.parameters():
         q.requires_grad_(False)
-    opt = torch.optim.Adam(model.parameters(), lr=args.lr, eps=1e-5)
+    # Les premières convolutions (apprises par imitation) restent gelées : sur
+    # le GPU du Mac, leur rétropropagation coûtait ~2/3 de la mise à jour.
+    convs = [m for m in model.cnn if isinstance(m, torch.nn.Conv2d)]
+    for conv in convs[: args.freeze_convs]:
+        conv.requires_grad_(False)
+    trainable = [q for q in model.parameters() if q.requires_grad]
+    value_params = {id(q) for q in model.value_head.parameters()}
+    opt = torch.optim.Adam(trainable, lr=args.lr, eps=1e-5)
     state = {"update": 0, "decisions": 0, "difficulty": 0, "seconds": 0.0, "episodes": 0}
     window: deque = deque(maxlen=args.window)
     if resume:
@@ -187,6 +195,14 @@ def main() -> None:
                 adv_all = adv.reshape(-1)[sel]
                 ret_all = ret.reshape(-1)[sel]
                 adv_all = (adv_all - adv_all.mean()) / (adv_all.std() + 1e-8)
+                # Sorties de la politique imitée, une fois par rollout (pas à chaque époque).
+                ref_store: dict[str, torch.Tensor] = {}
+                with torch.no_grad():
+                    for i in range(0, len(sel), args.minibatch):
+                        part = reference(obs_to_torch({k: v[i : i + args.minibatch] for k, v in data.items()}, device))
+                        for k, v in part.items():
+                            ref_store.setdefault(k, []).append(v)
+                ref_store = {k: torch.cat(v) for k, v in ref_store.items()}
                 warmup = u < args.value_warmup
                 stats: dict[str, list[float]] = {k: [] for k in ("loss_pi", "loss_v", "entropy", "kl_bc", "approx_kl", "clipfrac")}
                 for _ in range(args.epochs):
@@ -201,16 +217,21 @@ def main() -> None:
                         a_t = torch.as_tensor(adv_all[mb], device=device)
                         pg = torch.max(-a_t * ratio, -a_t * ratio.clamp(1 - args.clip, 1 + args.clip)).mean()
                         v_loss = 0.5 * (out["value"] - torch.as_tensor(ret_all[mb], device=device)).pow(2).mean()
-                        with torch.no_grad():
-                            ref_out = reference(x)
-                        kl_bc = kl_to_reference(out, ref_out, x, act).mean()
+                        mb_t = torch.as_tensor(mb, device=device)
+                        kl_bc = kl_to_reference(out, {k: v[mb_t] for k, v in ref_store.items()}, x, act).mean()
                         if warmup:
                             loss = args.vf * v_loss
                         else:
                             loss = pg + args.vf * v_loss - args.ent * ent.mean() + kl_coef * kl_bc
                         opt.zero_grad(set_to_none=True)
                         loss.backward()
-                        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
+                        if warmup:
+                            # Échauffement : seule la tête de valeur bouge (le tronc est partagé
+                            # avec la politique, qui doit rester celle de l'imitation).
+                            for q in trainable:
+                                if id(q) not in value_params:
+                                    q.grad = None
+                        torch.nn.utils.clip_grad_norm_(trainable, 0.5)
                         opt.step()
                         with torch.no_grad():
                             stats["loss_pi"].append(float(pg))
