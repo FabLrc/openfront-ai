@@ -66,6 +66,13 @@ export function writeRecord(record: GameRecord, entry: Omit<IndexEntry, "file" |
   return full;
 }
 
+/** Ajoute une ligne à runs/<series>/metrics.jsonl (une écriture par ligne : sûr entre processus). */
+export function appendMetrics(series: string, line: Record<string, unknown>): void {
+  const dir = path.join(RUNS_DIR, safe(series));
+  fs.mkdirSync(dir, { recursive: true });
+  fs.appendFileSync(path.join(dir, "metrics.jsonl"), JSON.stringify(line) + "\n");
+}
+
 export function readRecordFile(file: string): GameRecord {
   const raw = fs.readFileSync(file);
   const text = file.endsWith(".gz") ? zlib.gunzipSync(raw).toString("utf8") : raw.toString("utf8");
