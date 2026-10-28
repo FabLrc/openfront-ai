@@ -48,7 +48,7 @@ def main() -> None:
         args.minutes = 5
 
     print(f"Série « {args.series} » : {args.procs} processus × {args.games_per_proc} parties, agent {args.agent}", flush=True)
-    with ServerPool(args.procs, base_port=args.base_port, dashboard=not args.no_dashboard) as pool:
+    with ServerPool(args.procs, base_port=args.base_port, dashboard=not args.no_dashboard, label=args.series) as pool:
         env = VecOpenFrontEnv(
             pool.ports,
             games_per_server=args.games_per_proc,

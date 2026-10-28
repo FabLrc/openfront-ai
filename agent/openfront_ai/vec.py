@@ -63,9 +63,22 @@ def _port_open(port: int) -> bool:
 class ServerPool:
     """Processus serveur d'environnement (env/src/main.ts) lancés localement."""
 
-    def __init__(self, n: int | None = None, base_port: int = 6000, dashboard: bool = True, verbose: bool = False):
+    def __init__(
+        self,
+        n: int | None = None,
+        base_port: int = 6000,
+        dashboard: bool = True,
+        verbose: bool = False,
+        label: str = "série",
+        live_base_port: int = 7000,
+    ):
+        """``label`` nomme ces processus dans le sélecteur de /live : chacun sert
+        sa propre page /live sur ``live_base_port + i`` (si le port est libre),
+        enregistrée dans runs/live-sources.json pour le serveur principal."""
         self.n = n or performance_cores()
         self.ports = [base_port + i for i in range(self.n)]
+        self.label = label
+        self.live: list[dict[str, Any]] = []
         env_dir = ROOT / "env"
         tsx = env_dir / "node_modules" / ".bin" / "tsx"
         path = os.environ.get("PATH", "")
@@ -78,8 +91,10 @@ class ServerPool:
                 self.close()
                 raise EnvError(f"port {port} déjà utilisé")
             first = i == 0 and dashboard
-            http = 8080 if first and _port_free(8080) else 0
+            http = 8080 if first and _port_free(8080) else live_base_port + i if _port_free(live_base_port + i) else 0
             api = 8787 if first and _port_free(8787) else 0
+            if http:
+                self.live.append({"label": f"{label} · processus {i + 1}", "http_port": http, "env_port": port})
             cmd = [str(tsx), "src/main.ts", "--port", str(port), "--http-port", str(http), "--api-port", str(api)]
             out = None if verbose else subprocess.DEVNULL
             self.procs.append(subprocess.Popen(cmd, cwd=env_dir, env=env, stdout=out, stderr=out))
@@ -90,8 +105,27 @@ class ServerPool:
                     self.close()
                     raise EnvError(f"le serveur du port {port} n'a pas démarré")
                 time.sleep(0.1)
+        for entry, proc in zip(self.live, self.procs):
+            entry["pid"] = proc.pid
+        self._register(add=True)
+
+    def _register(self, add: bool) -> None:
+        """Ajoute ou retire nos pages /live dans runs/live-sources.json."""
+        path = RUNS_DIR / "live-sources.json"
+        try:
+            entries = json.loads(path.read_text()) if path.exists() else []
+        except (OSError, json.JSONDecodeError):
+            entries = []
+        mine = {e["http_port"] for e in self.live}
+        entries = [e for e in entries if e.get("http_port") not in mine]
+        if add:
+            entries += self.live
+        RUNS_DIR.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(entries, ensure_ascii=False, indent=1))
 
     def close(self) -> None:
+        if self.procs:
+            self._register(add=False)
         for p in self.procs:
             p.terminate()
         for p in self.procs:
