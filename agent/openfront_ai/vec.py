@@ -70,7 +70,7 @@ class ServerPool:
         dashboard: bool = True,
         verbose: bool = False,
         label: str = "série",
-        live_base_port: int = 7000,
+        live_base_port: int = 7100,  # 7000 : récepteur AirPlay de macOS
     ):
         """``label`` nomme ces processus dans le sélecteur de /live : chacun sert
         sa propre page /live sur ``live_base_port + i`` (si le port est libre),

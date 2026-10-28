@@ -14,7 +14,7 @@ import time
 import numpy as np
 
 from openfront_ai.agents import PolicyAgent, RandomAgent, RuleAgent
-from openfront_ai.vec import RUNS_DIR, ServerPool, VecOpenFrontEnv, performance_cores
+from openfront_ai.vec import RUNS_DIR, ServerPool, VecOpenFrontEnv, log_train, performance_cores
 
 AGENTS = {"random": RandomAgent, "rule": RuleAgent}
 
@@ -42,6 +42,8 @@ def main() -> None:
     parser.add_argument("--record-every", type=int, default=0, help="enregistre une partie sur N (0 : aucune)")
     parser.add_argument("--base-port", type=int, default=6000)
     parser.add_argument("--seed", help="préfixe des graines (même valeur = mêmes parties d'un agent à l'autre)")
+    parser.add_argument("--log-to", metavar="SERIE", help="écrit le bilan dans runs/SERIE/train.jsonl (eval_<difficulté>_…)")
+    parser.add_argument("--log-step", type=int, default=0, help="abscisse du bilan (par ex. décisions d'entraînement)")
     parser.add_argument("--no-dashboard", action="store_true", help="ne sert pas le tableau de bord sur :8080")
     args = parser.parse_args()
     if args.minutes <= 0 and args.episodes <= 0:
@@ -108,6 +110,19 @@ def main() -> None:
         finally:
             env.close()
     print(f"Terminé : {done_episodes} épisodes ; métriques dans {RUNS_DIR / args.series}/metrics.jsonl")
+    if results and args.log_to:
+        # Bilan à partir des métriques de l'environnement (part de territoire comprise).
+        lines = [json.loads(line) for line in (RUNS_DIR / args.series / "metrics.jsonl").read_text().splitlines()][: args.episodes or None]
+        tag = f"eval_{args.difficulty.lower()}"
+        log_train(
+            args.log_to,
+            step=args.log_step,
+            **{
+                f"{tag}_win_rate": float(np.mean([m["won"] for m in lines])),
+                f"{tag}_rank": float(np.mean([m["rank"] for m in lines])),
+                f"{tag}_share": float(np.mean([m["share"] for m in lines])),
+            },
+        )
     if results:
         print(json.dumps({
             "episodes": len(results),
