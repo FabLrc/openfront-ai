@@ -12,7 +12,7 @@ import argparse
 import time
 
 from openfront_ai import EnvClient, OpenFrontEnv
-from openfront_ai.agents import RandomAgent, RuleAgent
+from openfront_ai.agents import PolicyAgent, RandomAgent, RuleAgent
 from openfront_ai.env import ACTION_TYPES
 
 
@@ -36,7 +36,10 @@ def run_nations(args: argparse.Namespace) -> None:
 
 
 def run_agent(args: argparse.Namespace) -> None:
-    agent = (RuleAgent if args.agent == "rule" else RandomAgent)(seed=0)
+    if args.agent == "policy":
+        agent = PolicyAgent(args.checkpoint, greedy=args.greedy, seed=0)
+    else:
+        agent = (RuleAgent if args.agent == "rule" else RandomAgent)(seed=0)
     env = OpenFrontEnv(
         agents=1,
         nations=args.nations - 1,
@@ -55,9 +58,13 @@ def run_agent(args: argparse.Namespace) -> None:
         while env.agents:
             a = env.agents[0]
             action = agent.act(obs[a])
-            # Pour /live : nombre d'actions valides par type (les vraies probabilités viendront de la politique).
-            m = obs[a]["masks"]["type"].astype(float)
-            probs = dict(zip(ACTION_TYPES, (m / m.sum()).round(2).tolist()))
+            # Pour /live : probabilités des types de la politique apprise ; pour
+            # les agents de référence, parts égales entre les types autorisés.
+            if isinstance(agent, PolicyAgent):
+                probs = agent.last_probs
+            else:
+                m = obs[a]["masks"]["type"].astype(float)
+                probs = dict(zip(ACTION_TYPES, (m / m.sum()).round(2).tolist()))
             obs, _, terms, truncs, infos = env.step({a: action}, annotations={a: {"probs": probs}})
             info = infos[a]
             if info["tick"] % 2000 < args.ticks:
@@ -76,7 +83,9 @@ def main() -> None:
     parser.add_argument("--difficulty", default="Medium", choices=["Easy", "Medium", "Hard", "Impossible"])
     parser.add_argument("--seed", default="openfront-ai")
     parser.add_argument("--ticks", type=int, default=10, help="ticks par pas")
-    parser.add_argument("--agent", choices=["random", "rule"], help="un siège joué par cet agent")
+    parser.add_argument("--agent", choices=["random", "rule", "policy"], help="un siège joué par cet agent")
+    parser.add_argument("--checkpoint", help="checkpoint de la politique (--agent policy)")
+    parser.add_argument("--greedy", action="store_true")
     parser.add_argument("--port", type=int, default=5555)
     parser.add_argument("--record", metavar="SERIE", help="enregistre la partie dans runs/SERIE/")
     args = parser.parse_args()
