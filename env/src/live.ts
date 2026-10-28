@@ -134,16 +134,23 @@ export class LiveHub {
     for (const ws of targets) ws.send(msg);
   }
 
-  listen(port: number, pages: Record<string, () => string> = {}): http.Server {
+  /** `pages` : chemin → HTML (chaîne) ou données renvoyées en JSON ({ json }). */
+  listen(port: number, pages: Record<string, (url: URL) => string | { json: unknown }> = {}): http.Server {
     const server = http.createServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://localhost");
       const page = pages[url.pathname];
       if (page !== undefined) {
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-        res.end(page());
+        const out = page(url);
+        if (typeof out === "string") {
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+          res.end(out);
+        } else {
+          res.writeHead(200, { "content-type": "application/json", "cache-control": "no-store" });
+          res.end(JSON.stringify(out.json));
+        }
         return;
       }
-      if (url.pathname === "/" || url.pathname === "/live") {
+      if (url.pathname === "/live") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
         res.end(fs.readFileSync(VIEWER_HTML));
         return;
