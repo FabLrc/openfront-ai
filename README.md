@@ -17,7 +17,8 @@ affiche la partie en direct.
 | `env/` | Serveur d'environnement en TypeScript (Node 24, lancé avec `tsx`). Il importe le moteur directement depuis `openfront/packages/*/src`. |
 | `agent/` | Client Python (≥ 3.11) : classe `OpenFrontEnv` et script de démo. |
 | `viewer/` | Page « partie en direct », servie par le serveur Node. |
-| `scripts/` | Installation. |
+| `scripts/` | Installation, ouverture d'un replay dans le lecteur officiel. |
+| `runs/` | Parties enregistrées (non versionné). |
 
 ## Installation
 
@@ -42,7 +43,8 @@ NODE_BIN=/opt/homebrew/opt/node@24/bin NPM_BIN=~/openfront-bench/tools/node_modu
 
 ## Utilisation
 
-1. Lancer le serveur (socket `127.0.0.1:5555` et page `http://localhost:8080/live`) :
+1. Lancer le serveur (socket `127.0.0.1:5555`, pages `http://localhost:8080/live` et
+   `/games`, API des replays sur `http://localhost:8787`) :
 
    ```bash
    cd env && npm start
@@ -62,10 +64,11 @@ NODE_BIN=/opt/homebrew/opt/node@24/bin NPM_BIN=~/openfront-bench/tools/node_modu
    action (acceptée ou non par le moteur), le nombre d'actions valides par type
    et les probabilités si l'agent les envoie.
 
-4. Évaluer les agents de référence (aléatoire et à règles) :
+4. Évaluer les agents de référence (aléatoire et à règles), en enregistrant
+   les parties (voir plus bas pour les revoir) :
 
    ```bash
-   agent/.venv/bin/python agent/evaluate.py --games 10 --agent both
+   agent/.venv/bin/python agent/evaluate.py --games 10 --agent both --record essai
    ```
 
 Autres commandes :
@@ -135,7 +138,10 @@ commune et cible attaquable (pas d'alliance, pas d'immunité) pour l'attaque,
 or suffisant et emplacement valide pour la construction, côte atteignable par
 l'eau et nombre de bateaux pour le bateau, `canSendAllianceRequest` pour
 l'alliance. Une action masquée est remplacée par « rien » (`info["invalid"]`).
-`info["accepted"]` indique si le moteur a réellement exécuté l'action. Pour
+`info["accepted"]` indique si le moteur a réellement exécuté l'action. Le
+moteur juge une intention un tick après l'observation : il reste de rares
+refus (moins de 0,5 %, sur les tests) quand un front, une tuile ou un trajet
+par l'eau disparaît entre-temps. Pour
 limiter le coût, seules les 8 cases côtières les plus proches sont testées
 pour les bateaux (paramètre `boatCandidates` ; chaque test coûte ~0,07 ms).
 
@@ -172,6 +178,69 @@ La page `/live` reçoit par WebSocket (`/ws`), environ 5 fois par seconde, le
 propriétaire de chaque tuile d'une carte sous-échantillonnée (au plus 1000
 pixels de côté, `Uint16Array` compressé en deflate), la liste des joueurs et
 l'état des sièges d'agents. Elle affiche la dernière partie lancée.
+
+## Enregistrement des parties et replays
+
+![Une partie de l'agent dans le lecteur officiel d'OpenFront](docs/replay-viewer.png)
+
+Chaque partie peut être enregistrée au format officiel d'OpenFront
+(`GameRecord`, comme les archives du serveur) : configuration, joueurs, tous
+les Turns avec les intentions des agents (les Nations sont recréées par le
+moteur) et les hashes d'état publiés tous les 10 ticks. Le commit
+d'OpenFrontIO (`d1f2362`) y est inscrit.
+
+```bash
+# 20 parties de l'agent à règles, enregistrées dans runs/regles/
+agent/.venv/bin/python agent/evaluate.py --games 20 --agent rule --record regles
+# une partie sur 5 seulement, jouées jusqu'au vainqueur après la mort de l'agent
+agent/.venv/bin/python agent/evaluate.py --games 100 --record regles --record-every 5 --record-to-end
+```
+
+- Fichiers : `runs/<série>/games/<gameID>.json.gz` (10 à 30 Ko par partie) et
+  `runs/<série>/index.jsonl` (date, carte, graine, vainqueur, rang de l'agent,
+  durée). En Python : `OpenFrontEnv(record="serie", record_every=N, record_to_end=True)`.
+- L'identifiant de partie (8 à 10 caractères alphanumériques, exigés par le
+  lecteur) vient de la graine : la graine elle-même si elle convient, sinon
+  les 10 premiers caractères de son SHA-1. Il initialise les tirages du
+  moteur, donc deux graines différentes donnent deux parties différentes.
+- Un épisode s'arrête à la mort de l'agent : sans `--record-to-end`, le record
+  s'arrête là (« partie non finie » dans l'index).
+- Rejeu headless (mêmes hashes, même vainqueur) :
+
+  ```bash
+  cd env && npx tsx src/replay.ts ../runs/regles/games/<gameID>.json.gz
+  ```
+
+### Lecteur officiel
+
+```bash
+scripts/replay-viewer.sh <gameID>   # sans identifiant : la liste des parties
+```
+
+Le script lance au besoin le serveur d'environnement et le client OpenFront
+en mode développement (vite, `http://localhost:9000`), puis ouvre
+`http://localhost:9000/#replay-viewer=<gameID>`. Le sous-module n'est pas
+modifié : en développement, le client cherche les records sur
+`http://localhost:8787/game/<id>` (sans `API_DOMAIN`), et c'est le serveur
+d'environnement qui y répond avec `runs/`. Les autres appels du client à l'API
+(actualités, cosmétiques, connexion) reçoivent un 404 sans gêner le lecteur.
+
+La page <http://localhost:8080/games> liste les parties enregistrées (date,
+série, carte, vainqueur, rang de l'agent, durée) avec un lien « Voir le replay ».
+
+![Liste des parties](docs/games.png)
+
+### Longs calculs
+
+Le Mac peut se mettre en veille pendant une longue série de parties. Pour
+l'en empêcher le temps d'une commande :
+
+```bash
+caffeinate -i agent/.venv/bin/python agent/evaluate.py --games 200 --record longue --record-every 10
+```
+
+Mieux vaut découper les longues mesures en plusieurs séries courtes (une
+série par commande, chacune dans son dossier `runs/`).
 
 ## Agents de référence
 
