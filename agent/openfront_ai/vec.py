@@ -16,8 +16,11 @@ from __future__ import annotations
 import json
 import os
 import platform
+import signal
 import socket
 import subprocess
+import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -33,12 +36,27 @@ RUNS_DIR = Path(os.environ.get("OPENFRONT_RUNS_DIR", ROOT / "runs"))
 
 
 def performance_cores() -> int:
-    """Nombre de cœurs performance (macOS), sinon la moitié des cœurs."""
+    """Cœurs performance (macOS) ou cœurs physiques (Linux, WSL), sinon la moitié des cœurs logiques."""
     if platform.system() == "Darwin":
         try:
             out = subprocess.run(["sysctl", "-n", "hw.perflevel0.physicalcpu"], capture_output=True, text=True, check=True)
             return max(1, int(out.stdout.strip()))
         except (OSError, ValueError, subprocess.CalledProcessError):
+            pass
+    if platform.system() == "Linux":
+        try:
+            cores = set()
+            physical = core = None
+            for line in Path("/proc/cpuinfo").read_text().splitlines():
+                key, _, value = line.partition(":")
+                if key.strip() == "physical id":
+                    physical = value.strip()
+                elif key.strip() == "core id":
+                    core = value.strip()
+                    cores.add((physical, core))
+            if cores:
+                return len(cores)
+        except OSError:
             pass
     return max(1, (os.cpu_count() or 2) // 2)
 
@@ -108,6 +126,10 @@ class ServerPool:
         for entry, proc in zip(self.live, self.procs):
             entry["pid"] = proc.pid
         self._register(add=True)
+        # Arrêt par SIGTERM (kill) : sortir proprement pour arrêter aussi les
+        # serveurs, au lieu de les laisser orphelins.
+        if threading.current_thread() is threading.main_thread():
+            signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
     def _register(self, add: bool) -> None:
         """Ajoute ou retire nos pages /live dans runs/live-sources.json."""
@@ -117,7 +139,16 @@ class ServerPool:
         except (OSError, json.JSONDecodeError):
             entries = []
         mine = {e["http_port"] for e in self.live}
-        entries = [e for e in entries if e.get("http_port") not in mine]
+
+        def alive(pid) -> bool:
+            try:
+                os.kill(int(pid), 0)
+                return True
+            except (OSError, TypeError, ValueError):
+                return False
+
+        # On retire aussi les entrées de processus disparus (série interrompue).
+        entries = [e for e in entries if e.get("http_port") not in mine and alive(e.get("pid"))]
         if add:
             entries += self.live
         RUNS_DIR.mkdir(parents=True, exist_ok=True)

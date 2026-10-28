@@ -28,7 +28,7 @@ import torch
 
 from openfront_ai.model import best_device, load_checkpoint, obs_to_torch, save_checkpoint
 from openfront_ai.ppo import gae, kl_to_reference, log_prob_entropy, sample
-from openfront_ai.vec import ROOT, RUNS_DIR, ServerPool, VecOpenFrontEnv, log_train, performance_cores
+from openfront_ai.vec import RUNS_DIR, ServerPool, VecOpenFrontEnv, log_train, performance_cores
 
 DIFFICULTIES = ["Medium", "Hard", "Impossible"]
 
@@ -68,7 +68,7 @@ class Rollout:
 def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--series", required=True)
-    p.add_argument("--init", default=str(ROOT / "runs" / "bc1" / "ckpt" / "best.pt"))
+    p.add_argument("--init", default=str(RUNS_DIR / "bc1" / "ckpt" / "best.pt"))
     p.add_argument("--minutes", type=float, default=30, help="durée de ce segment (checkpoint à chaque mise à jour)")
     p.add_argument("--fresh", action="store_true", help="ignorer un checkpoint existant de la série")
     p.add_argument("--procs", type=int, default=performance_cores())
@@ -93,7 +93,8 @@ def main() -> None:
     p.add_argument("--record-every", type=int, default=50, help="enregistre une partie sur N (0 : aucune)")
     p.add_argument("--snapshot-every", type=int, default=25, help="copie du checkpoint toutes les N mises à jour")
     p.add_argument("--base-port", type=int, default=6400)
-    p.add_argument("--freeze-convs", type=int, default=2, help="premières convolutions gelées (rétropropagation coûteuse sur le GPU du Mac)")
+    p.add_argument("--freeze-convs", type=int, default=None,
+                   help="premières convolutions gelées ; défaut : 2 sur le GPU du Mac (rétropropagation lente), 0 ailleurs")
     args = p.parse_args()
 
     device = best_device()
@@ -107,6 +108,8 @@ def main() -> None:
         q.requires_grad_(False)
     # Les premières convolutions (apprises par imitation) restent gelées : sur
     # le GPU du Mac, leur rétropropagation coûtait ~2/3 de la mise à jour.
+    if args.freeze_convs is None:
+        args.freeze_convs = 2 if device.type == "mps" else 0
     convs = [m for m in model.cnn if isinstance(m, torch.nn.Conv2d)]
     for conv in convs[: args.freeze_convs]:
         conv.requires_grad_(False)
@@ -116,7 +119,12 @@ def main() -> None:
     state = {"update": 0, "decisions": 0, "difficulty": 0, "seconds": 0.0, "episodes": 0}
     window: deque = deque(maxlen=args.window)
     if resume:
-        opt.load_state_dict(ckpt["optimizer"])
+        try:
+            opt.load_state_dict(ckpt["optimizer"])
+        except ValueError:
+            # Autres couches gelées qu'à la sauvegarde (par ex. reprise sur CUDA
+            # d'un run du Mac) : on garde les poids, l'optimiseur repart de zéro.
+            print("Optimiseur réinitialisé : les couches entraînées diffèrent de celles du checkpoint.")
         state.update(ckpt["progress"])
         window.extend(ckpt.get("window", []))
         print(f"Reprise : mise à jour {state['update']}, {state['decisions']} décisions, difficulté {DIFFICULTIES[state['difficulty']]}")
