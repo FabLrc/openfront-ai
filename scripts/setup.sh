@@ -34,6 +34,7 @@ PYTHON="${PYTHON:-$(command -v python3.12 || command -v python3)}"
 "$PYTHON" -c 'import sys; assert sys.version_info >= (3, 11), "Python >= 3.11 requis"'
 "$PYTHON" -m venv agent/.venv
 agent/.venv/bin/pip install --quiet --upgrade pip
+agent/.venv/bin/pip install --quiet -r agent/requirements.txt
 agent/.venv/bin/pip install --quiet -e agent
 
 echo "Terminé."
