@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import zlib from "node:zlib";
 import { WebSocket, WebSocketServer } from "ws";
 import { OpenFrontGame } from "./game";
+import { SeatDisplay } from "./seat";
 
 const VIEWER_HTML = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -34,6 +35,7 @@ export function playerColor(id: number): string {
 
 export class LiveHub {
   private current: OpenFrontGame | null = null;
+  private displays: () => SeatDisplay[] = () => [];
   private ended = false;
   private speedSetting: Speed = "max";
   private clients = new Set<WebSocket>();
@@ -49,8 +51,9 @@ export class LiveHub {
     return this.speedSetting === "max" ? null : Number(this.speedSetting);
   }
 
-  attach(game: OpenFrontGame): void {
+  attach(game: OpenFrontGame, displays: () => SeatDisplay[] = () => []): void {
     this.current = game;
+    this.displays = displays;
     this.ended = false;
     this.lastTick = -1;
     const map = game.game.map();
@@ -113,6 +116,8 @@ export class LiveHub {
       ended: this.ended,
       winner: state.winner,
       players: state.players.map((p) => ({ ...p, color: playerColor(p.id) })),
+      // Sièges d'agents : mis en évidence sur la carte, avec leur dernière action.
+      agents: this.displays(),
       owners: zlib
         .deflateSync(Buffer.from(owners.buffer, owners.byteOffset, owners.byteLength))
         .toString("base64"),
