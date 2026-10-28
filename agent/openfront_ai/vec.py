@@ -25,7 +25,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
 
@@ -184,6 +184,8 @@ class _Game:
     agents: list[str] = field(default_factory=list)
     # Réinitialisation envoyée, réponse pas encore lue.
     resetting: bool = False
+    # Difficulté des Nations de l'épisode en cours.
+    difficulty: str = ""
 
 
 class VecOpenFrontEnv:
@@ -191,7 +193,9 @@ class VecOpenFrontEnv:
     ``actions`` de forme [B, 5] ; seuls les sièges ``active`` sont joués (les
     autres attendent la réinitialisation de leur partie, leurs actions sont
     ignorées). Chaque épisode est borné à ``max_ticks`` (fin propre : classement
-    par territoire)."""
+    par territoire). Si ``pick_difficulty`` est donné, il choisit la difficulté
+    de chaque nouvelle partie (sinon ``config["difficulty"]``) ; les infos de
+    fin d'épisode portent ``difficulty``, celle de la partie jouée."""
 
     def __init__(
         self,
@@ -209,8 +213,10 @@ class VecOpenFrontEnv:
         record: str | None = None,
         record_every: int = 1,
         throughput_interval: float = 10.0,
+        pick_difficulty: Callable[[], str] | None = None,
         **options: Any,
     ):
+        self.pick_difficulty = pick_difficulty
         self.config: dict[str, Any] = {
             "agents": agents,
             "nations": nations,
@@ -291,7 +297,7 @@ class VecOpenFrontEnv:
                 rewards[b] = header["rewards"][name]
                 terminated[b] = header["terminations"][name]
                 truncated[b] = header["truncations"][name]
-                infos[b] = header["infos"][name]
+                infos[b] = {**header["infos"][name], "difficulty": g.difficulty}
                 self._fill(b, name, buffers)
             g.agents = list(header["agents"])
             for j, name in enumerate(self.names):
@@ -324,7 +330,9 @@ class VecOpenFrontEnv:
         g.resetting = True
         g.episode += 1
         g.tick = 0
-        g.client.send({"cmd": "reset", "config": {**self.config, "seed": f"{self.seed}-{g.index}-{g.episode}"}})
+        g.difficulty = self.pick_difficulty() if self.pick_difficulty else self.config["difficulty"]
+        config = {**self.config, "difficulty": g.difficulty, "seed": f"{self.seed}-{g.index}-{g.episode}"}
+        g.client.send({"cmd": "reset", "config": config})
 
     def _receive_reset(self, g: _Game, infos: list[dict[str, Any]]) -> None:
         header, buffers = g.client.receive()

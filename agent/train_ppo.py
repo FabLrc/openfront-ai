@@ -4,14 +4,16 @@
     (relancer la même commande reprend au dernier checkpoint ; voir scripts/train-ppo.sh)
 
 - Initialisation depuis --init (par défaut runs/bc1/ckpt/best.pt), copie gelée
-  de cette politique comme référence : pénalité KL(π‖π_imitée) dont le
-  coefficient décroît jusqu'à 0, pour ne pas tout oublier au début.
+  de --reference (par défaut --init) comme référence : pénalité KL(π‖π_imitée)
+  dont le coefficient décroît jusqu'à --kl-floor, pour ne pas tout oublier.
 - Premières mises à jour : tête de valeur seule (elle n'a pas été entraînée).
 - GAE, objectif PPO tronqué, bonus d'entropie, avantages normalisés.
 - Curriculum : Medium → Hard → Impossible quand le taux de victoire glissant
-  sur la difficulté courante dépasse --promote.
+  sur la difficulté courante dépasse --promote. Avec --mix-current < 1, une
+  fois promu, chaque partie tire le niveau courant (avec cette probabilité)
+  ou le précédent ; la promotion ne compte que les parties du niveau courant.
 - Récompense de l'environnement : victoire, rang final, et un shaping sur la
-  part de territoire dont le coefficient décroît.
+  part de territoire dont le coefficient décroît jusqu'à --shaping-floor.
 - Métriques dans runs/<série>/train.jsonl (tableau de bord), épisodes dans
   metrics.jsonl, une partie sur N enregistrée, checkpoints dans runs/<série>/ckpt/.
 """
@@ -27,15 +29,10 @@ import numpy as np
 import torch
 
 from openfront_ai.model import best_device, load_checkpoint, obs_to_torch, save_checkpoint
-from openfront_ai.ppo import gae, kl_to_reference, log_prob_entropy, sample
+from openfront_ai.ppo import gae, kl_to_reference, log_prob_entropy, mixed_difficulty, sample, schedule
 from openfront_ai.vec import RUNS_DIR, ServerPool, VecOpenFrontEnv, log_train, performance_cores
 
 DIFFICULTIES = ["Medium", "Hard", "Impossible"]
-
-
-def schedule(start: float, update: int, horizon: int) -> float:
-    """Décroissance linéaire de start à 0 en `horizon` mises à jour."""
-    return start * max(0.0, 1.0 - update / max(1, horizon))
 
 
 class Rollout:
@@ -69,6 +66,8 @@ def main() -> None:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     p.add_argument("--series", required=True)
     p.add_argument("--init", default=str(RUNS_DIR / "bc1" / "ckpt" / "best.pt"))
+    p.add_argument("--reference", default=None, help="politique de référence de la KL (défaut : --init)")
+    p.add_argument("--difficulty", choices=DIFFICULTIES, default="Medium", help="difficulté de départ (hors reprise)")
     p.add_argument("--minutes", type=float, default=30, help="durée de ce segment (checkpoint à chaque mise à jour)")
     p.add_argument("--fresh", action="store_true", help="ignorer un checkpoint existant de la série")
     p.add_argument("--procs", type=int, default=performance_cores())
@@ -83,9 +82,13 @@ def main() -> None:
     p.add_argument("--ent", type=float, default=0.01)
     p.add_argument("--vf", type=float, default=0.5)
     p.add_argument("--kl", type=float, default=0.5, help="coefficient initial de la pénalité KL vers la politique imitée")
-    p.add_argument("--kl-decay", type=int, default=300, help="mises à jour pour l'annuler")
+    p.add_argument("--kl-decay", type=int, default=300, help="mises à jour pour l'amener au plancher")
+    p.add_argument("--kl-floor", type=float, default=0.0, help="plancher du coefficient KL")
     p.add_argument("--shaping", type=float, default=0.5, help="coefficient initial du shaping de territoire")
     p.add_argument("--shaping-decay", type=int, default=600)
+    p.add_argument("--shaping-floor", type=float, default=0.0, help="plancher du shaping")
+    p.add_argument("--mix-current", type=float, default=1.0,
+                   help="une fois promu, part des parties au niveau courant (le reste au précédent)")
     p.add_argument("--value-warmup", type=int, default=5, help="mises à jour de la tête de valeur seule")
     p.add_argument("--promote", type=float, default=0.5, help="taux de victoire glissant pour passer à la difficulté suivante")
     p.add_argument("--window", type=int, default=50, help="épisodes de la fenêtre glissante")
@@ -102,7 +105,7 @@ def main() -> None:
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     resume = (ckpt_dir / "last.pt").exists() and not args.fresh
     model, ckpt = load_checkpoint(ckpt_dir / "last.pt" if resume else args.init, device)
-    reference, _ = load_checkpoint(args.init, device)
+    reference, _ = load_checkpoint(args.reference or args.init, device)
     reference.eval()
     for q in reference.parameters():
         q.requires_grad_(False)
@@ -116,7 +119,7 @@ def main() -> None:
     trainable = [q for q in model.parameters() if q.requires_grad]
     value_params = {id(q) for q in model.value_head.parameters()}
     opt = torch.optim.Adam(trainable, lr=args.lr, eps=1e-5)
-    state = {"update": 0, "decisions": 0, "difficulty": 0, "seconds": 0.0, "episodes": 0}
+    state = {"update": 0, "decisions": 0, "difficulty": DIFFICULTIES.index(args.difficulty), "seconds": 0.0, "episodes": 0}
     window: deque = deque(maxlen=args.window)
     if resume:
         try:
@@ -136,6 +139,11 @@ def main() -> None:
 
     start = time.monotonic()
     seconds0 = state["seconds"]
+    rng = np.random.default_rng()
+
+    def pick_difficulty() -> str:
+        return DIFFICULTIES[mixed_difficulty(state["difficulty"], rng, args.mix_current)]
+
     with ServerPool(args.procs, base_port=args.base_port, dashboard=True, label=args.series) as pool:
         env = VecOpenFrontEnv(
             pool.ports,
@@ -148,7 +156,8 @@ def main() -> None:
             series=args.series,
             record=args.series if args.record_every > 0 else None,
             record_every=max(1, args.record_every),
-            shaping=schedule(args.shaping, state["update"], args.shaping_decay),
+            shaping=schedule(args.shaping, state["update"], args.shaping_decay, args.shaping_floor),
+            pick_difficulty=pick_difficulty,
         )
         obs, _ = env.reset()
         B, T = env.num_envs, args.steps
@@ -158,9 +167,8 @@ def main() -> None:
         try:
             while time.monotonic() - start < args.minutes * 60:
                 u = state["update"]
-                kl_coef = schedule(args.kl, u, args.kl_decay)
-                env.config["shaping"] = schedule(args.shaping, u, args.shaping_decay)
-                env.config["difficulty"] = DIFFICULTIES[state["difficulty"]]
+                kl_coef = schedule(args.kl, u, args.kl_decay, args.kl_floor)
+                env.config["shaping"] = schedule(args.shaping, u, args.shaping_decay, args.shaping_floor)
                 t0 = time.monotonic()
 
                 # ── Collecte ──
@@ -185,7 +193,8 @@ def main() -> None:
                     ep_return += buf.rewards[t]
                     for b in np.flatnonzero(done & active):
                         info = infos[b]
-                        window.append({"won": bool(info.get("won")), "rank": info.get("rank"), "difficulty": state["difficulty"]})
+                        window.append({"won": bool(info.get("won")), "rank": info.get("rank"),
+                                       "difficulty": DIFFICULTIES.index(info["difficulty"])})
                         returns.append(float(ep_return[b]))
                         ep_return[b] = 0.0
                         state["episodes"] += 1

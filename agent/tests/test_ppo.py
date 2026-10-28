@@ -5,8 +5,29 @@ import torch
 
 from openfront_ai.env import ATTACK, BOAT, BUILD, NOOP
 from openfront_ai.model import PolicyNet, obs_to_torch
-from openfront_ai.ppo import gae, kl_to_reference, log_prob_entropy, sample
+from openfront_ai.ppo import gae, kl_to_reference, log_prob_entropy, mixed_difficulty, sample, schedule
 from test_model import fake_batch
+
+
+def test_schedule_plancher():
+    assert schedule(0.5, 0, 300) == 0.5
+    assert schedule(0.5, 300, 300) == 0.0
+    # Avec plancher : de 0,5 à 0,1, puis 0,1 pour toujours.
+    assert abs(schedule(0.5, 150, 300, floor=0.1) - 0.3) < 1e-9
+    assert schedule(0.5, 300, 300, floor=0.1) == 0.1
+    assert schedule(0.5, 10_000, 300, floor=0.1) == 0.1
+
+
+def test_mixed_difficulty():
+    rng = np.random.default_rng(0)
+    # Premier niveau : toujours lui.
+    assert {mixed_difficulty(0, rng, 0.7) for _ in range(200)} == {0}
+    # Sans mélange (1.0) : toujours le niveau courant.
+    assert {mixed_difficulty(2, rng, 1.0) for _ in range(200)} == {2}
+    # Une fois promu : niveau courant ~70 %, sinon le précédent, jamais d'autre.
+    draws = np.array([mixed_difficulty(1, rng, 0.7) for _ in range(5000)])
+    assert set(draws.tolist()) == {0, 1}
+    assert abs((draws == 1).mean() - 0.7) < 0.03
 
 
 def test_sample_et_log_prob_coherents():

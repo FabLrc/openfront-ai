@@ -78,6 +78,22 @@ normal : sur le Mac, deux convolutions étaient gelées, et sur le PC tout le
 réseau est entraîné. Les poids et la progression (mise à jour, curriculum)
 sont repris, seul l'état de l'optimiseur repart de zéro.
 
+Sur ppo1, les performances se sont effondrées une fois la pénalité KL tombée
+à 0 (vers la mise à jour 300). La série ppo2 repart de l'instantané 250 de
+ppo1, avec des planchers pour la KL et le shaping et un curriculum mélangé
+(70 % de parties au niveau courant, 30 % au précédent). Les options après les
+trois premiers arguments sont passées à chaque segment :
+
+```bash
+scripts/train-ppo.sh ppo2 5 30 --init runs/ppo1/ckpt/ppo_00250.pt --reference runs/bc1/ckpt/best.pt \
+  --difficulty Hard --kl 0.5 --kl-floor 0.1 --kl-decay 300 \
+  --shaping 0.25 --shaping-floor 0.1 --shaping-decay 1000 --mix-current 0.7 --value-warmup 0
+```
+
+Après les deux évaluations de chaque segment, `runs/<série>/ckpt/best_eval.pt`
+garde le checkpoint de la meilleure (victoires en Hard, puis en Medium, puis
+rang moyen en Hard) ; le score est dans `best_eval.json`.
+
 Le nombre de processus de jeu vaut par défaut le nombre de cœurs physiques
 (par exemple 8 sur un i7 à 8 cœurs). Le choisir avec
 `agent/.venv/bin/python agent/train_ppo.py --series ppo1 --procs 6`. Le jeu
