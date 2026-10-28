@@ -57,7 +57,16 @@ class EnvClient:
         return self.request(message)
 
     def request(self, message: dict[str, Any]) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+        self.send(message)
+        return self.receive()
+
+    def send(self, message: dict[str, Any]) -> None:
+        """Envoie une requête sans attendre la réponse (voir ``receive``) : on
+        peut ainsi faire avancer plusieurs parties, sur plusieurs processus, en
+        même temps."""
         self._sock.sendall(encode_frame(message))
+
+    def receive(self) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
         (length,) = _U32.unpack(self._recv_exact(4))
         header, buffers = decode_body(self._recv_exact(length))
         if not header.get("ok"):
