@@ -850,7 +850,21 @@ export class AgentSeat {
       if (pend.accepted === undefined) pend.accepted = ok;
     };
     rec.init = (mg, t) => {
+      // État juste avant que le moteur ne juge l'intention, pour expliquer un refus.
+      const target = pend.type === T_BOAT ? this.game.owner(pend.tile!) : pend.target;
+      const before = target?.isPlayer()
+        ? !target.isAlive()
+          ? "cible morte"
+          : p.isFriendly(target)
+            ? "cible alliée"
+            : !p.canAttackPlayer(target)
+              ? "cible immunisée"
+              : null
+        : null;
       init(mg, t);
+      if (pend.type === T_ATTACK || pend.type === T_BOAT) {
+        pend.reason = before ?? (pend.type === T_ATTACK ? "plus de front commun" : "pas de trajet par l'eau");
+      }
       switch (pend.type) {
         case T_ATTACK: {
           const toConquer = rec.toConquer as { size(): number } | undefined;

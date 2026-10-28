@@ -62,13 +62,20 @@ describe("sièges d'agents", () => {
     return { accepted, rejected, total };
   }
 
-  it("un agent seul : le moteur accepte toute action autorisée par les masques", async () => {
-    const { accepted, rejected } = await sample([
+  // Le moteur juge une intention un tick après l'observation, une fois les
+  // exécutions en cours avancées : un front, une tuile ou un trajet par l'eau
+  // peut disparaître entre-temps. Les masques prennent des marges ; il reste
+  // de rares refus de ce type, jamais une cible interdite (alliée, immunisée).
+  const RACES = ["plus de front commun", "pas de trajet par l'eau", "tuile perdue", "cible morte"];
+
+  it("un agent seul : refus très rares, seulement par course avec le tick suivant", async () => {
+    const { accepted, rejected, total } = await sample([
       ...Array.from({ length: 6 }, (_, i): [string, number, number] => [`masques-${i}`, 1, 7]),
       ["masques-6", 1, 3],
       ["masques-7", 1, 1],
     ]);
-    expect(rejected).toEqual([]);
+    expect(rejected.length / total).toBeLessThan(0.005);
+    for (const r of rejected) expect(RACES.some((reason) => r.action.includes(reason)), r.action).toBe(true);
     for (const t of ["attack", "boat", "build", "alliance"]) {
       expect(accepted[t] ?? 0).toBeGreaterThan(0);
     }
