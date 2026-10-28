@@ -134,9 +134,15 @@ export class LiveHub {
     for (const ws of targets) ws.send(msg);
   }
 
-  listen(port: number): http.Server {
+  listen(port: number, pages: Record<string, () => string> = {}): http.Server {
     const server = http.createServer((req, res) => {
       const url = new URL(req.url ?? "/", "http://localhost");
+      const page = pages[url.pathname];
+      if (page !== undefined) {
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+        res.end(page());
+        return;
+      }
       if (url.pathname === "/" || url.pathname === "/live") {
         res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
         res.end(fs.readFileSync(VIEWER_HTML));
