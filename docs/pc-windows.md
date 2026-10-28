@@ -37,9 +37,8 @@ npm install -g npm@12
 ## 3. Dépôt et dépendances
 
 ```bash
-git clone --recurse-submodules https://github.com/FabLrc/openfront-ai.git
+git clone https://github.com/FabLrc/openfront-ai.git
 cd openfront-ai
-git checkout ppo
 ./scripts/setup.sh
 # PyTorch avec CUDA (remplace la version CPU installée par requirements.txt)
 agent/.venv/bin/pip install --index-url https://download.pytorch.org/whl/cu128 torch
