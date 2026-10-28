@@ -2,6 +2,9 @@
  * Partie OpenFront headless : même pipeline que
  * openfront/tests/perf/fullgame/FullGamePerf.ts (EngineConfig réel, GameRunner,
  * Executor, nations du manifeste de la carte), piloté tick par tick.
+ *
+ * Les sièges d'agents sont des joueurs Human, comme de vrais clients : ils
+ * agissent par des intentions placées dans le Turn du tick suivant.
  */
 import {
   Difficulty,
@@ -9,19 +12,25 @@ import {
   GameMapType,
   GameMode,
   GameType,
+  PlayerInfo,
   PlayerType,
 } from "@openfront/engine-api/game/GameTypes";
 import {
   GameUpdateType,
   HashUpdate,
 } from "@openfront/engine-api/game/GameUpdates";
-import { GameConfig, GameStartInfo } from "@openfront/engine-api/Schemas";
+import {
+  ClientID,
+  GameConfig,
+  GameStartInfo,
+  StampedIntent,
+} from "@openfront/engine-api/Schemas";
 import { loadTerrainMap } from "@openfront/engine-lib/game/TerrainMapLoader";
 import { PseudoRandom } from "@openfront/engine-lib/PseudoRandom";
 import { simpleHash } from "@openfront/engine-lib/Util";
 import { EngineConfig } from "@openfront/engine/configuration/EngineConfig";
 import { Executor } from "@openfront/engine/execution/ExecutionManager";
-import { Game, Player } from "@openfront/engine/game/Game";
+import { Execution, Game, Player } from "@openfront/engine/game/Game";
 import { createGame } from "@openfront/engine/game/GameImpl";
 import { createNationsForGame } from "@openfront/engine/game/NationCreation";
 import { GameRunner } from "@openfront/engine/GameRunner";
@@ -40,9 +49,12 @@ export interface ResetConfig {
   /** Nom de carte insensible à la casse, ex. "world", "europe". */
   map?: string;
   size?: "Compact" | "Normal";
+  /** Nombre de Nations (0 : aucune). */
   nations?: number;
   difficulty?: "Easy" | "Medium" | "Hard" | "Impossible";
   seed?: string;
+  /** Nombre de sièges d'agents (joueurs Human). */
+  agents?: number;
 }
 
 export interface PlayerState {
@@ -77,18 +89,38 @@ export function resolveMap(name: string): GameMapType {
   return GameMapType[key as keyof typeof GameMapType];
 }
 
+/** clientID du siège i (8 à 10 caractères alphanumériques, cf. GAME_ID_REGEX). */
+export function seatClientID(i: number): ClientID {
+  return `AGENT${String(i).padStart(3, "0")}`;
+}
+
+/** Signale chaque exécution créée pour une intention, pour savoir si le moteur l'accepte. */
+class TrackingExecutor extends Executor {
+  onCreate: (intent: StampedIntent, exec: Execution) => void = () => {};
+
+  createExec(intent: StampedIntent): Execution {
+    const exec = super.createExec(intent);
+    this.onCreate(intent, exec);
+    return exec;
+  }
+}
+
 export class OpenFrontGame {
   private turnNumber = 0;
   private lastHash: number | null = null;
   private fatalError: string | undefined;
   private runner: GameRunner;
+  private executor: TrackingExecutor;
+  readonly seats: Player[];
 
   private constructor(
     readonly config: Required<ResetConfig>,
     readonly game: Game,
     gameID: string,
+    seatClientIDs: ClientID[],
   ) {
-    this.runner = new GameRunner(game, new Executor(game, gameID, undefined), (gu) => {
+    this.executor = new TrackingExecutor(game, gameID, undefined);
+    this.runner = new GameRunner(game, this.executor, (gu) => {
       if ("errMsg" in gu) {
         this.fatalError = `${gu.errMsg}\n${gu.stack ?? ""}`;
         return;
@@ -99,6 +131,7 @@ export class OpenFrontGame {
       }
     });
     this.runner.init();
+    this.seats = seatClientIDs.map((id) => game.playerByClientID(id)!);
   }
 
   static async create(cfg: ResetConfig = {}): Promise<OpenFrontGame> {
@@ -108,6 +141,7 @@ export class OpenFrontGame {
       nations: cfg.nations ?? 8,
       difficulty: cfg.difficulty ?? "Medium",
       seed: cfg.seed ?? "openfront-ai",
+      agents: cfg.agents ?? 0,
     };
     const gameConfig: GameConfig = {
       gameMap: resolveMap(config.map),
@@ -115,7 +149,7 @@ export class OpenFrontGame {
       gameMode: GameMode.FFA,
       gameType: GameType.Public,
       difficulty: Difficulty[config.difficulty],
-      nations: config.nations,
+      nations: config.nations > 0 ? config.nations : "disabled",
       donateGold: false,
       donateTroops: false,
       bots: 0,
@@ -124,11 +158,16 @@ export class OpenFrontGame {
       instantBuild: false,
       randomSpawn: false,
     };
+    const seatIDs = Array.from({ length: config.agents }, (_, i) => seatClientID(i));
     const gameStart: GameStartInfo = {
       gameID: config.seed,
       lobbyCreatedAt: 0,
       config: gameConfig,
-      players: [],
+      players: seatIDs.map((clientID, i) => ({
+        clientID,
+        username: `Agent ${i}`,
+        clanTag: null,
+      })),
     };
     const terrain = await loadTerrainMap(
       await loadMapFiles(
@@ -137,37 +176,50 @@ export class OpenFrontGame {
         gameConfig.gameMapSize,
       ),
     );
+    // Même ordre de tirages que createGameRunner() : humains puis nations.
+    const random = new PseudoRandom(simpleHash(gameStart.gameID));
+    const humans = gameStart.players.map(
+      (p) =>
+        new PlayerInfo(p.username, PlayerType.Human, p.clientID, random.nextID(), false, null, [], null),
+    );
     const nations = createNationsForGame(
       gameStart,
       terrain.nations,
       terrain.additionalNations,
-      0,
-      new PseudoRandom(simpleHash(gameStart.gameID)),
+      humans.length,
+      random,
     );
     const game = createGame(
-      [],
+      humans,
       nations,
       terrain.gameMap,
       terrain.miniGameMap,
       new EngineConfig(gameConfig, false),
       terrain.teamGameSpawnAreas,
     );
-    const g = new OpenFrontGame(config, game, gameStart.gameID);
-    // La phase de spawn n'offre aucune décision à l'agent pour l'instant.
-    while (game.inSpawnPhase()) {
-      if (g.turnNumber >= MAX_SPAWN_TURNS) {
-        throw new Error(`phase de spawn non terminée après ${MAX_SPAWN_TURNS} tours`);
-      }
-      g.tick();
-    }
+    const g = new OpenFrontGame(config, game, gameStart.gameID, seatIDs);
+    // Sans agent, la phase de spawn n'offre aucune décision : on la joue tout de suite.
+    if (config.agents === 0) g.finishSpawnPhase();
     return g;
   }
 
-  private tick(): void {
-    this.runner.addTurn({ turnNumber: this.turnNumber++, intents: [] });
+  private tick(intents: StampedIntent[] = []): void {
+    this.runner.addTurn({ turnNumber: this.turnNumber++, intents });
     this.runner.executeNextTick();
     if (this.fatalError !== undefined) {
       throw new Error(`erreur du moteur au tick ${this.game.ticks()}:\n${this.fatalError}`);
+    }
+  }
+
+  /** Joue les ticks restants de la phase de spawn, intentions dans le premier. */
+  finishSpawnPhase(intents: StampedIntent[] = []): void {
+    let first = true;
+    while (this.game.inSpawnPhase()) {
+      if (this.turnNumber >= MAX_SPAWN_TURNS) {
+        throw new Error(`phase de spawn non terminée après ${MAX_SPAWN_TURNS} tours`);
+      }
+      this.tick(first ? intents : []);
+      first = false;
     }
   }
 
@@ -175,12 +227,20 @@ export class OpenFrontGame {
     return this.game.getWinner() !== null;
   }
 
-  /** Avance de n ticks, ou moins si la partie se termine. */
-  step(n = 10): GameState {
+  /**
+   * Avance de n ticks, ou moins si la partie se termine. Les intentions
+   * partent dans le Turn du premier tick.
+   */
+  step(n = 10, intents: StampedIntent[] = []): GameState {
     for (let i = 0; i < n && !this.done(); i++) {
-      this.tick();
+      this.tick(i === 0 ? intents : []);
     }
     return this.state();
+  }
+
+  /** Appelé pour chaque exécution créée à partir d'une intention. */
+  onExecutionCreated(fn: (intent: StampedIntent, exec: Execution) => void): void {
+    this.executor.onCreate = fn;
   }
 
   state(): GameState {
