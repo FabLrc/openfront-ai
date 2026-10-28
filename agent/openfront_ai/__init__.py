@@ -1,3 +1,3 @@
-from .env import EnvError, OpenFrontEnv
+from .env import EnvClient, EnvError, OpenFrontEnv
 
-__all__ = ["EnvError", "OpenFrontEnv"]
+__all__ = ["EnvClient", "EnvError", "OpenFrontEnv"]
