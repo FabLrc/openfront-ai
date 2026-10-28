@@ -3,7 +3,7 @@ name = "openfront-ai"
 version = "0.0.0"
 description = "Agent et client de l'environnement OpenFront"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["numpy>=2.0", "gymnasium>=1.0", "pettingzoo>=1.24"]
 
 [build-system]
 requires = ["setuptools>=68"]

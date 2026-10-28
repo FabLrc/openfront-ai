@@ -37,6 +37,15 @@
   .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; }
   #banner { margin-top: 10px; padding: 8px; border-radius: 6px; background: #1f3a24; display: none; }
   #empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  .ia { display: inline-block; font-size: 10px; font-weight: 700; padding: 0 4px; margin-left: 4px;
+    border-radius: 3px; background: #fff; color: #000; vertical-align: 1px; }
+  .agent { border: 1px solid var(--line); border-radius: 6px; padding: 8px; margin-bottom: 12px; }
+  .agent .act { margin: 4px 0; }
+  .agent .ok { color: #6fd38a; } .agent .ko { color: #ff7b7b; }
+  .bars { display: grid; grid-template-columns: 64px 1fr 34px; gap: 2px 6px; font-size: 12px;
+    color: var(--muted); align-items: center; }
+  .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--accent); }
   @media (max-width: 800px) { main { flex-direction: column; } aside { width: 100%; } }
 </style>
 </head>
@@ -57,6 +66,7 @@
     <canvas id="c" hidden></canvas>
   </div>
   <aside>
+    <div id="agents"></div>
     <h2>Classement</h2>
     <table>
       <thead><tr><th></th><th>Joueur</th><th>Tuiles</th><th>Troupes</th><th>Or</th></tr></thead>
@@ -103,23 +113,68 @@ async function onFrame(f) {
   if (view === null) return;
   const owners = new Uint16Array((await inflate(f.owners)).buffer);
   const palette = new Map(f.players.map((p) => [p.id, rgb(p.color)]));
-  const px = view.image.data;
+  const agents = f.agents ?? [];
+  const agentIds = new Set(agents.map((a) => a.id));
+  const W = view.width, px = view.image.data;
+  // Centre de chaque territoire d'agent, pour son étiquette.
+  const sums = new Map(agents.map((a) => [a.id, [0, 0, 0]]));
   for (let i = 0; i < owners.length; i++) {
-    const c = owners[i] ? palette.get(owners[i]) ?? LAND : view.land[i] ? LAND : WATER;
+    const o = owners[i];
+    let c = o ? palette.get(o) ?? LAND : view.land[i] ? LAND : WATER;
+    if (agentIds.has(o)) {
+      const s = sums.get(o); s[0] += i % W; s[1] += (i / W) | 0; s[2]++;
+      // Contour blanc : une voisine n'appartient pas à l'agent.
+      const x = i % W;
+      if ((x > 0 && owners[i - 1] !== o) || (x < W - 1 && owners[i + 1] !== o) ||
+          owners[i - W] !== o || owners[i + W] !== o) c = [255, 255, 255];
+    }
     px[i * 4] = c[0]; px[i * 4 + 1] = c[1]; px[i * 4 + 2] = c[2]; px[i * 4 + 3] = 255;
   }
   ctx.putImageData(view.image, 0, 0);
+  ctx.font = `bold ${Math.max(12, Math.round(W / 60))}px system-ui, sans-serif`;
+  ctx.textAlign = "center"; ctx.lineWidth = 4; ctx.strokeStyle = "#000"; ctx.fillStyle = "#fff";
+  for (const a of agents) {
+    const [sx, sy, n] = sums.get(a.id);
+    if (n === 0) continue;
+    const label = `IA · ${a.name}`;
+    ctx.strokeText(label, sx / n, sy / n - 10); ctx.fillText(label, sx / n, sy / n - 10);
+  }
+  renderAgents(agents, f.players);
 
   const ranked = [...f.players].sort((a, b) => b.tiles - a.tiles);
   $("rank").innerHTML = ranked.map((p) => `
     <tr class="${p.alive ? "" : "dead"}">
       <td><span class="sw" style="background:${p.color}"></span></td>
-      <td title="${p.name}">${p.name}</td>
+      <td title="${esc(p.name)}">${esc(p.name)}${agentIds.has(p.id) ? '<span class="ia">IA</span>' : ""}</td>
       <td>${fmt(p.tiles)}</td><td>${fmt(p.troops)}</td><td>${fmt(p.gold)}</td>
     </tr>`).join("");
   const banner = $("banner");
   banner.style.display = f.winner ? "block" : "none";
   banner.textContent = f.winner ? `Vainqueur : ${f.winner}` : "";
+}
+
+const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+
+/** Panneau par agent : dernière action, actions valides par type, probabilités fournies. */
+function renderAgents(agents, players) {
+  $("agents").innerHTML = agents.map((a) => {
+    const p = players.find((q) => q.id === a.id);
+    const status = a.accepted === true ? '<span class="ok">acceptée</span>'
+      : a.accepted === false ? '<span class="ko">refusée</span>' : "";
+    const probs = a.annotations?.probs;
+    const rows = probs
+      ? Object.entries(probs).map(([k, v]) =>
+          `<span>${esc(k)}</span><span class="bar"><i style="width:${Math.round(v * 100)}%"></i></span><span>${(v * 100).toFixed(0)} %</span>`).join("")
+      : "";
+    const valid = Object.entries(a.validCounts).filter(([, n]) => n > 0)
+      .map(([k, n]) => `${esc(k)} ${n}`).join(" · ") || "aucune";
+    return `<div class="agent">
+      <h2><span class="sw" style="background:${p?.color ?? "#fff"}"></span> IA · ${esc(a.name)}</h2>
+      <div class="act">${esc(a.lastAction)} ${status}</div>
+      <div class="stat">Valides : ${valid}</div>
+      ${rows ? `<div class="stat" style="margin-top:6px">Probabilités</div><div class="bars">${rows}</div>` : ""}
+    </div>`;
+  }).join("");
 }
 
 let ws;

@@ -1,21 +1,20 @@
 /**
- * Serveur d'environnement : une partie par connexion TCP.
+ * Serveur d'environnement : une partie par connexion TCP (voir protocol.ts).
  *
- * Requêtes (une trame JSON chacune, réponse dans le même ordre) :
- *   {"cmd": "reset", "config": {map, size, nations, difficulty, seed}}
- *   {"cmd": "step", "ticks": 10}
+ * Requêtes (une trame chacune, réponse dans le même ordre) :
+ *   {"cmd": "reset", "config": EnvConfig}
+ *   {"cmd": "step", "ticks": 10, "actions": {"agent_0": [type, cible, case, quantité, unité]},
+ *    "annotations": {"agent_0": {...}}}   // facultatif, affiché sur /live
  *   {"cmd": "close"}
- * Réponses : {"ok": true, "state": GameState} ou {"ok": false, "error": "..."}.
+ * Réponse : {"ok": true, "state", "agents", "rewards", "terminations",
+ * "truncations", "infos"} (+ "spec" au reset) et les observations en tableaux
+ * binaires nommés "<agent>/<champ>" ; ou {"ok": false, "error": "..."}.
  */
 import net from "node:net";
-import { GameState, OpenFrontGame, ResetConfig } from "./game";
-import { FrameReader, sendFrame } from "./protocol";
+import { AgentEnv, EnvConfig } from "./agentEnv";
 import { LiveHub } from "./live";
-
-type Request =
-  | { cmd: "reset"; config?: ResetConfig }
-  | { cmd: "step"; ticks?: number }
-  | { cmd: "close" };
+import { Frame, FrameReader, sendFrame } from "./protocol";
+import { Action } from "./seat";
 
 const MS_PER_TICK = 100; // durée d'un tick en temps réel (EngineConfig.msPerTick)
 
@@ -23,55 +22,63 @@ export function startEnvServer(port: number, hub: LiveHub): net.Server {
   const server = net.createServer((socket) => {
     socket.setNoDelay(true);
     const reader = new FrameReader();
-    let game: OpenFrontGame | null = null;
+    let env: AgentEnv | null = null;
     // Les requêtes sont traitées une par une, même si plusieurs arrivent d'un coup.
     let queue = Promise.resolve();
 
-    const handle = async (req: Request): Promise<GameState | null> => {
+    const handle = async ({ header: req }: Frame): Promise<void> => {
       switch (req.cmd) {
-        case "reset":
-          if (game !== null) hub.detach(game);
-          game = await OpenFrontGame.create(req.config ?? {});
-          hub.attach(game);
-          return game.state();
+        case "reset": {
+          if (env !== null) hub.detach(env.game);
+          env = await AgentEnv.create((req.config ?? {}) as EnvConfig);
+          const current = env;
+          hub.attach(env.game, () => current.displays());
+          const { buffers, ...rest } = env.reset();
+          sendFrame(socket, { ok: true, spec: env.spec(), ...rest }, buffers);
+          return;
+        }
         case "step": {
-          if (game === null) throw new Error("step avant reset");
-          const ticks = Math.max(1, Math.floor(req.ticks ?? 10));
+          if (env === null) throw new Error("step avant reset");
+          const ticks = Math.max(1, Math.floor((req.ticks as number | undefined) ?? 10));
           const start = performance.now();
-          const before = game.game.ticks();
-          const state = game.step(ticks);
-          hub.recordTicks(state.tick - before);
+          const before = env.game.game.ticks();
+          const { buffers, ...rest } = env.step(
+            (req.actions ?? {}) as Record<string, Action>,
+            ticks,
+            (req.annotations ?? {}) as Record<string, unknown>,
+          );
+          hub.recordTicks(rest.state.tick - before);
           // Vitesse réglée depuis la page /live : on ralentit la réponse.
           const speed = hub.speed();
           if (speed !== null) {
-            const target = ((state.tick - before) * MS_PER_TICK) / speed;
+            const target = ((rest.state.tick - before) * MS_PER_TICK) / speed;
             const wait = target - (performance.now() - start);
             if (wait > 0) await new Promise((r) => setTimeout(r, wait));
           }
-          return state;
+          if (!socket.destroyed) sendFrame(socket, { ok: true, ...rest }, buffers);
+          return;
         }
         case "close":
           socket.end();
-          return null;
+          return;
         default:
           throw new Error(`commande inconnue : ${JSON.stringify(req)}`);
       }
     };
 
     socket.on("data", (chunk) => {
-      let requests: unknown[];
+      let frames: Frame[];
       try {
-        requests = reader.push(chunk);
+        frames = reader.push(chunk);
       } catch (err) {
         sendFrame(socket, { ok: false, error: String(err) });
         socket.destroy();
         return;
       }
-      for (const req of requests) {
+      for (const frame of frames) {
         queue = queue.then(async () => {
           try {
-            const state = await handle(req as Request);
-            if (!socket.destroyed && state !== null) sendFrame(socket, { ok: true, state });
+            await handle(frame);
           } catch (err) {
             if (!socket.destroyed) {
               sendFrame(socket, { ok: false, error: err instanceof Error ? err.message : String(err) });
@@ -81,7 +88,7 @@ export function startEnvServer(port: number, hub: LiveHub): net.Server {
       }
     });
     socket.on("close", () => {
-      if (game !== null) hub.detach(game);
+      if (env !== null) hub.detach(env.game);
     });
     socket.on("error", () => {});
   });
