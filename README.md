@@ -60,7 +60,9 @@ NODE_BIN=/opt/homebrew/opt/node@24/bin NPM_BIN=~/openfront-bench/tools/node_modu
 3. Ouvrir <http://localhost:8080/live> pour suivre la partie. Les boutons
    **x1** (temps réel, 10 ticks/s), **x10** et **max** règlent la vitesse de
    simulation ; par défaut le serveur va au maximum. Les territoires des agents
-   sont entourés de blanc et étiquetés « IA » ; un panneau montre leur dernière
+   sont entourés de blanc et étiquetés « IA » ; structures, navires, trains,
+   bombes (avec leur trajectoire et leur explosion) et retombées sont dessinés
+   à la couleur de leur propriétaire (légende à droite) ; un panneau montre leur dernière
    action (acceptée ou non par le moteur), le nombre d'actions valides par type
    et les probabilités si l'agent les envoie.
 

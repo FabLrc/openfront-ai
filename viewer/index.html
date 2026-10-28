@@ -249,7 +249,9 @@ async function onFrame(f) {
   labels = [];
   for (const a of agents) {
     const [sx, sy, n] = sums.get(a.id);
-    if (n > 0) labels.push([`IA · ${a.name}`, sx / n, sy / n - 10]);
+    // Étiquette au-dessus du territoire, sans sortir de la carte.
+    const size = Math.max(12, Math.round(W / 60));
+    if (n > 0) labels.push([`IA · ${a.name}`, Math.min(Math.max(sx / n, 3 * size), W - 3 * size), Math.max(size + 2, sy / n - 10)]);
   }
   drawOverlay();
   renderAgents(agents, f.players);
