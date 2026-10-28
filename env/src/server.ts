@@ -50,6 +50,7 @@ export function startEnvServer(port: number, hub: LiveHub): net.Server {
             ticks,
             (req.annotations ?? {}) as Record<string, unknown>,
           );
+          const computeMs = performance.now() - start;
           hub.recordTicks(rest.state.tick - before);
           // Vitesse réglée depuis la page /live : on ralentit la réponse.
           const speed = hub.speed();
@@ -58,7 +59,8 @@ export function startEnvServer(port: number, hub: LiveHub): net.Server {
             const wait = target - (performance.now() - start);
             if (wait > 0) await new Promise((r) => setTimeout(r, wait));
           }
-          if (!socket.destroyed) sendFrame(socket, { ok: true, ...rest }, buffers);
+          // Temps de calcul du pas (hors attente pour la vitesse de /live).
+          if (!socket.destroyed) sendFrame(socket, { ok: true, server_ms: computeMs, ...rest }, buffers);
           return;
         }
         case "close":
