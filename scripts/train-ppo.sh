@@ -3,7 +3,11 @@
 # segment (40 parties à graines fixes contre 7 Nations Medium puis Hard),
 # écrite dans le train.jsonl de la série (courbes eval_* du tableau de bord).
 #
-#   scripts/train-ppo.sh <série> [heures=4] [minutes par segment=30]
+#   scripts/train-ppo.sh <série> [heures=4] [minutes par segment=30] [options de train_ppo.py…]
+#
+# Les options supplémentaires sont passées à chaque segment de train_ppo.py
+# (par ex. --kl-floor 0.1). Après les deux évaluations, ckpt/best_eval.pt garde
+# le checkpoint de la meilleure (voir agent/best_eval.py).
 #
 # Sur macOS, caffeinate -i empêche la veille pendant le script (ailleurs, voir
 # docs/pc-windows.md). On peut l'interrompre et le relancer : l'entraînement
@@ -11,15 +15,16 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="$ROOT/agent/.venv/bin/python"
-series="${1:?usage : $0 <série> [heures] [minutes par segment]}"
+series="${1:?usage : $0 <série> [heures] [minutes par segment] [options…]}"
 hours="${2:-4}"
 segment="${3:-30}"
+shift $(( $# < 3 ? $# : 3 ))
 end=$(( $(date +%s) + ${hours%.*} * 3600 ))
 awake=()
 command -v caffeinate > /dev/null && awake=(caffeinate -i)
 
 while [ "$(date +%s)" -lt "$end" ]; do
-  ${awake[@]+"${awake[@]}"} "$PY" "$ROOT/agent/train_ppo.py" --series "$series" --minutes "$segment"
+  ${awake[@]+"${awake[@]}"} "$PY" "$ROOT/agent/train_ppo.py" --series "$series" --minutes "$segment" "$@"
   ckpt="$ROOT/runs/$series/ckpt/last.pt"
   step=$("$PY" -c "import torch,sys; print(torch.load(sys.argv[1], weights_only=False)['progress']['decisions'])" "$ckpt")
   for diff in Medium Hard; do
@@ -29,4 +34,5 @@ while [ "$(date +%s)" -lt "$end" ]; do
       --episodes 40 --seed evalfix --difficulty "$diff" --no-dashboard --base-port 6700 \
       --log-to "$series" --log-step "$step" | tail -2
   done
+  "$PY" "$ROOT/agent/best_eval.py" --series "$series" --step "$step"
 done

@@ -3,6 +3,7 @@
     agent/.venv/bin/python -m pytest agent/tests
 """
 
+import itertools
 import json
 
 import numpy as np
@@ -30,8 +31,11 @@ def test_batch_reset_auto_et_metriques(runs_dir):
     with vec.ServerPool(2, base_port=6300, dashboard=False) as pool:
         # Épisodes très courts (600 ticks) pour voir la réinitialisation automatique.
         env = vec.VecOpenFrontEnv(
-            pool.ports, games_per_server=2, agents=2, nations=2, max_ticks=600, series="test", throughput_interval=0.5
+            pool.ports, games_per_server=2, agents=2, nations=2, max_ticks=600, series="test", throughput_interval=0.5,
+            pick_difficulty=lambda: next(difficulties),
         )
+        difficulties = itertools.cycle(["Medium", "Hard"])
+        played = set()
         try:
             obs, _ = env.reset()
             assert env.num_envs == 8
@@ -50,10 +54,13 @@ def test_batch_reset_auto_et_metriques(runs_dir):
                 ended += int((terms | truncs).sum())
                 for b in np.flatnonzero(terms | truncs):
                     assert "rank" in infos[b]
+                    played.add(infos[b]["difficulty"])
                     # Réinitialisation en arrière-plan : siège inactif jusqu'au pas suivant.
                     assert not env.active[b]
                 resets += sum("reset" in info for info in infos)
             assert env.episodes > 0 and ended > 0 and resets > 0
+            # Difficulté tirée à chaque partie, rapportée dans les infos de fin d'épisode.
+            assert played == {"Medium", "Hard"}
         finally:
             env.close()
 

@@ -19,6 +19,19 @@ AMOUNT_TYPES = (ATTACK, BOAT)
 CELL_TYPES = (BOAT, BUILD)
 
 
+def schedule(start: float, update: int, horizon: int, floor: float = 0.0) -> float:
+    """Décroissance linéaire de start à floor en `horizon` mises à jour, puis floor."""
+    return floor + (start - floor) * max(0.0, 1.0 - update / max(1, horizon))
+
+
+def mixed_difficulty(level: int, rng: np.random.Generator, current: float = 0.7) -> int:
+    """Difficulté d'une nouvelle partie : le niveau courant avec la probabilité
+    `current`, sinon le précédent (au premier niveau, toujours celui-ci)."""
+    if level <= 0 or rng.random() < current:
+        return level
+    return level - 1
+
+
 def _is(typ: torch.Tensor, types: tuple[int, ...]) -> torch.Tensor:
     out = torch.zeros_like(typ, dtype=torch.bool)
     for t in types:
