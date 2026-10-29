@@ -26,12 +26,13 @@ affiche la partie en direct.
 Prérequis : Node 24, npm 12 (exigés par OpenFrontIO), Python ≥ 3.11, git.
 
 ```bash
-git clone --recurse-submodules https://github.com/FabLrc/openfront-ai.git
+git clone https://github.com/FabLrc/openfront-ai.git
 cd openfront-ai
 ./scripts/setup.sh
 ```
 
-Le script initialise le sous-module, installe ses dépendances
+Le script initialise le sous-module (sans `--recurse-submodules` : un
+sous-module imbriqué d'OpenFrontIO est privé et bloquerait le clone), installe ses dépendances
 (`npm run inst`), celles de `env/`, et crée le venv `agent/.venv`.
 
 Si Node 24 ou npm 12 ne sont pas les versions par défaut, indiquez leur dossier :
