@@ -33,7 +33,10 @@ export function startEnvServer(port: number, hub: LiveHub): net.Server {
             env.finish();
             hub.detach(env.game);
           }
-          env = await AgentEnv.create((req.config ?? {}) as EnvConfig);
+          // liveSpeed : vitesse de /live imposée par le client (scripts/watch.sh).
+          const { liveSpeed, ...config } = (req.config ?? {}) as EnvConfig & { liveSpeed?: string };
+          if (liveSpeed !== undefined) hub.setSpeed(String(liveSpeed));
+          env = await AgentEnv.create(config);
           const current = env;
           hub.attach(env.game, () => current.displays());
           const { buffers, ...rest } = env.reset();
@@ -45,20 +48,27 @@ export function startEnvServer(port: number, hub: LiveHub): net.Server {
           const ticks = Math.max(1, Math.floor((req.ticks as number | undefined) ?? 10));
           const start = performance.now();
           const before = env.game.game.ticks();
-          const { buffers, ...rest } = env.step(
-            (req.actions ?? {}) as Record<string, Action>,
-            ticks,
-            (req.annotations ?? {}) as Record<string, unknown>,
-          );
-          const computeMs = performance.now() - start;
-          hub.recordTicks(rest.state.tick - before);
-          // Vitesse réglée depuis la page /live : on ralentit la réponse.
+          const actions = (req.actions ?? {}) as Record<string, Action>;
+          const annotations = (req.annotations ?? {}) as Record<string, unknown>;
+          // Vitesse réglée depuis la page /live : on joue tick par tick en
+          // attendant entre deux, pour que la page voie chaque tick.
           const speed = hub.speed();
-          if (speed !== null) {
-            const target = ((rest.state.tick - before) * MS_PER_TICK) / speed;
-            const wait = target - (performance.now() - start);
-            if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-          }
+          let waited = 0; // temps passé à attendre, exclu de server_ms
+          let done = 0;
+          const pause = async () => {
+            done++;
+            const s = hub.speed();
+            if (s === null) return;
+            const wait = start + (done * MS_PER_TICK) / s - performance.now();
+            if (wait <= 0) return;
+            await new Promise((r) => setTimeout(r, wait));
+            waited += wait;
+          };
+          const { buffers, ...rest } = speed === null
+            ? env.step(actions, ticks, annotations)
+            : await env.stepPaced(actions, ticks, annotations, pause);
+          const computeMs = performance.now() - start - waited;
+          hub.recordTicks(rest.state.tick - before);
           // Temps de calcul du pas (hors attente pour la vitesse de /live).
           if (!socket.destroyed) sendFrame(socket, { ok: true, server_ms: computeMs, ...rest }, buffers);
           return;

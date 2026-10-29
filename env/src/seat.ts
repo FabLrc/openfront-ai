@@ -265,7 +265,18 @@ export interface SeatDisplay {
   accepted: boolean | null;
   validCounts: Record<string, number>;
   annotations?: unknown;
+  /** Dernières actions envoyées au moteur, la plus récente en dernier. */
+  history: ActionLog[];
 }
+
+export interface ActionLog {
+  tick: number;
+  action: string;
+  accepted: boolean;
+  reason: string | null;
+}
+
+const HISTORY = 20;
 
 export class AgentSeat {
   readonly k: number;
@@ -298,6 +309,7 @@ export class AgentSeat {
   lastAccepted: boolean | null = null;
   lastRejectReason: string | null = null;
   annotations: unknown = undefined;
+  history: ActionLog[] = [];
 
   constructor(
     readonly index: number,
@@ -1025,6 +1037,15 @@ export class AgentSeat {
     this.pending = null;
     this.lastAccepted = pend === null ? null : (pend.accepted ?? false);
     this.lastRejectReason = this.lastAccepted === false ? (pend?.reason ?? null) : null;
+    if (pend !== null) {
+      this.history.push({
+        tick: this.game.ticks(),
+        action: pend.description,
+        accepted: this.lastAccepted!,
+        reason: this.lastRejectReason,
+      });
+      if (this.history.length > HISTORY) this.history.shift();
+    }
     return this.lastAccepted;
   }
 
@@ -1046,6 +1067,7 @@ export class AgentSeat {
       accepted: this.lastAccepted,
       validCounts,
       annotations: this.annotations,
+      history: this.history,
     };
   }
 }

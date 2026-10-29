@@ -136,6 +136,41 @@ export class AgentEnv {
     ticks = 10,
     annotations: Record<string, unknown> = {},
   ): StepResult {
+    const pre = this.prepare(actions, annotations);
+    if (this.game.game.inSpawnPhase()) this.playSpawn(pre.intents);
+    else this.game.step(ticks, pre.intents);
+    return this.conclude(pre);
+  }
+
+  /**
+   * Comme step(), mais attend `pause()` après chaque tick : la page /live voit
+   * alors la partie avancer tick par tick à la vitesse choisie.
+   */
+  async stepPaced(
+    actions: Record<string, Action>,
+    ticks: number,
+    annotations: Record<string, unknown>,
+    pause: () => Promise<void>,
+  ): Promise<StepResult> {
+    const pre = this.prepare(actions, annotations);
+    if (this.game.game.inSpawnPhase()) {
+      this.playSpawn(pre.intents);
+    } else {
+      for (let i = 0; i < ticks && !this.game.done(); i++) {
+        this.game.step(1, i === 0 ? pre.intents : []);
+        await pause();
+      }
+    }
+    return this.conclude(pre);
+  }
+
+  private playSpawn(intents: StampedIntent[]): void {
+    this.game.finishSpawnPhase(intents);
+    this.numSpawned = this.game.game.players().length;
+  }
+
+  /** Actions → intentions, et compteurs de l'épisode. */
+  private prepare(actions: Record<string, Action>, annotations: Record<string, unknown>) {
     const g = this.game;
     const intents: StampedIntent[] = [];
     const invalid = new Set<string>();
@@ -162,13 +197,12 @@ export class AgentEnv {
         else if (seat.lastStale) st.stale++;
       }
     }
+    return { intents, invalid, sent };
+  }
 
-    if (g.game.inSpawnPhase()) {
-      g.finishSpawnPhase(intents);
-      this.numSpawned = g.game.players().length;
-    } else {
-      g.step(ticks, intents);
-    }
+  /** Après les ticks : verdicts du moteur, morts, observations et récompenses. */
+  private conclude({ invalid, sent }: { invalid: Set<string>; sent: Map<string, number> }): StepResult {
+    const g = this.game;
     // Décisions des Nations observées pendant ces ticks, traduites avec
     // l'observation précédente (avant de la recalculer dans result()).
     const labels: Record<string, NationLabel> = {};

@@ -4,7 +4,7 @@
  * Le serveur pousse via WebSocket (/ws), environ 5 fois par seconde, le
  * propriétaire de chaque tuile d'une carte sous-échantillonnée (Uint16Array
  * compressé en deflate puis base64) et la liste des joueurs. La page renvoie
- * le réglage de vitesse ({"type": "speed", "value": "1" | "10" | "max"}).
+ * le réglage de vitesse ({"type": "speed", "value": "1" | "2" | "4" | "10" | "max"}).
  */
 import fs from "node:fs";
 import http from "node:http";
@@ -51,7 +51,8 @@ export const VIEW_UNITS = [
 ];
 type ViewUnit = number[];
 
-type Speed = "1" | "10" | "max";
+const SPEEDS = ["1", "2", "4", "10", "max"] as const;
+type Speed = (typeof SPEEDS)[number];
 
 /** Couleur stable par smallID (angle d'or sur la teinte). */
 export function playerColor(id: number): string {
@@ -81,6 +82,13 @@ export class LiveHub {
   /** Vitesse en multiple du temps réel, null pour « max ». */
   speed(): number | null {
     return this.speedSetting === "max" ? null : Number(this.speedSetting);
+  }
+
+  /** Règle la vitesse (valeur inconnue ignorée). */
+  setSpeed(value: string): void {
+    if (!(SPEEDS as readonly string[]).includes(value)) return;
+    this.speedSetting = value as Speed;
+    this.broadcast([...this.clients]);
   }
 
   attach(game: OpenFrontGame, displays: () => SeatDisplay[] = () => []): void {
@@ -264,10 +272,7 @@ export class LiveHub {
       ws.on("message", (data) => {
         try {
           const msg = JSON.parse(data.toString());
-          if (msg.type === "speed" && ["1", "10", "max"].includes(msg.value)) {
-            this.speedSetting = msg.value;
-            this.broadcast([...this.clients]);
-          }
+          if (msg.type === "speed") this.setSpeed(String(msg.value));
         } catch {
           // message ignoré
         }

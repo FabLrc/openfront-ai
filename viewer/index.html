@@ -49,6 +49,15 @@
     color: var(--muted); align-items: center; }
   .bar { height: 8px; background: var(--line); border-radius: 4px; overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--accent); }
+  .agent .sum { display: grid; grid-template-columns: repeat(4, auto); gap: 2px 8px; margin: 6px 0;
+    font-variant-numeric: tabular-nums; }
+  .agent .sum b { display: block; font-size: 15px; }
+  .log { margin-top: 8px; max-height: 220px; overflow-y: auto; font-size: 12px;
+    font-variant-numeric: tabular-nums; border-top: 1px solid var(--line); padding-top: 6px; }
+  .log div { display: grid; grid-template-columns: 52px 1fr; gap: 6px; padding: 1px 0; }
+  .log .t { color: var(--muted); text-align: right; }
+  .log .ko { color: #ff7b7b; }
+  #names { display: flex; gap: 6px; align-items: center; }
   @media (max-width: 800px) { main { flex-direction: column; } aside { width: 100%; } }
 </style>
 </head>
@@ -59,9 +68,10 @@
   <span class="stat">Tick <b id="tick">—</b></span>
   <span class="stat">Vitesse <b id="tps">—</b> ticks/s</span>
   <span class="stat" id="conn">connexion…</span>
+  <label class="stat" id="names"><input type="checkbox" id="showNames" checked> Noms</label>
   <label class="stat">Source <select id="source"><option value="">ce serveur</option></select></label>
   <div class="speed" id="speed">
-    <button data-v="1">x1</button><button data-v="10">x10</button><button data-v="max">max</button>
+    <button data-v="1">x1</button><button data-v="2">x2</button><button data-v="4">x4</button><button data-v="10">x10</button><button data-v="max">max</button>
   </div>
 </header>
 <main>
@@ -174,9 +184,12 @@ function drawOverlay() {
     ctx.fillStyle = `rgba(255, ${Math.round(200 - 150 * k)}, 60, ${0.8 * (1 - k)})`;
     ctx.beginPath(); ctx.arc(e.x, e.y, e.r * (0.3 + k), 0, 2 * Math.PI); ctx.fill();
   }
-  ctx.font = `bold ${Math.max(12, Math.round(view.width / 60))}px system-ui, sans-serif`;
-  ctx.textAlign = "center"; ctx.lineWidth = 4; ctx.strokeStyle = "#000"; ctx.fillStyle = "#fff";
-  for (const [label, x, y] of labels) { ctx.strokeText(label, x, y); ctx.fillText(label, x, y); }
+  ctx.textAlign = "center"; ctx.strokeStyle = "#000";
+  for (const [label, x, y, size, ia] of labels) {
+    ctx.font = `${ia ? "bold " : ""}${size}px system-ui, sans-serif`;
+    ctx.lineWidth = ia ? 4 : 3; ctx.fillStyle = ia ? "#fff" : "rgba(255,255,255,.85)";
+    ctx.strokeText(label, x, y); ctx.fillText(label, x, y);
+  }
 }
 function animate() { drawOverlay(); requestAnimationFrame(animate); }
 requestAnimationFrame(animate);
@@ -229,8 +242,14 @@ async function onFrame(f) {
   const W = view.width, px = view.image.data;
   // Centre de chaque territoire d'agent, pour son étiquette.
   const sums = new Map(agents.map((a) => [a.id, [0, 0, 0]]));
+  const centers = new Map(); // id -> [Σx, Σy, n], pour le nom des autres joueurs
   for (let i = 0; i < owners.length; i++) {
     const o = owners[i] & 0x0fff;
+    if (o) {
+      let s = centers.get(o);
+      if (!s) centers.set(o, (s = [0, 0, 0]));
+      s[0] += i % W; s[1] += (i / W) | 0; s[2]++;
+    }
     const fallout = owners[i] & 0x8000;
     let c = o ? rgbOf.get(o) ?? LAND : view.land[i] ? (fallout ? FALLOUT : LAND) : WATER;
     if (o && fallout) c = [(c[0] + FALLOUT[0]) >> 1, (c[1] + FALLOUT[1]) >> 1, (c[2] + FALLOUT[2]) >> 1];
@@ -248,11 +267,20 @@ async function onFrame(f) {
   palette = new Map(f.players.map((p) => [p.id, p.color]));
   applyUnits(f.units);
   labels = [];
+  // Nom de chaque joueur vivant au centre de son territoire (case à cocher « Noms »).
+  if ($("showNames").checked) {
+    const size = Math.max(10, Math.round(W / 80));
+    for (const p of f.players) {
+      if (!p.alive || agentIds.has(p.id)) continue;
+      const [sx, sy, n] = centers.get(p.id) ?? [0, 0, 0];
+      if (n > 40) labels.push([p.name, sx / n, sy / n, size, false]);
+    }
+  }
   for (const a of agents) {
     const [sx, sy, n] = sums.get(a.id);
     // Étiquette au-dessus du territoire, sans sortir de la carte.
     const size = Math.max(12, Math.round(W / 60));
-    if (n > 0) labels.push([`IA · ${a.name}`, Math.min(Math.max(sx / n, 3 * size), W - 3 * size), Math.max(size + 2, sy / n - 10)]);
+    if (n > 0) labels.push([`IA · ${a.name}`, Math.min(Math.max(sx / n, 3 * size), W - 3 * size), Math.max(size + 2, sy / n - 10), size, true]);
   }
   drawOverlay();
   renderAgents(agents, f.players);
@@ -284,11 +312,24 @@ function renderAgents(agents, players) {
       : "";
     const valid = Object.entries(a.validCounts).filter(([, n]) => n > 0)
       .map(([k, n]) => `${esc(k)} ${n}`).join(" · ") || "aucune";
+    const ranked = [...players].sort((x, y) => y.tiles - x.tiles);
+    const alive = players.filter((q) => q.alive).length;
+    const totalTiles = players.reduce((n, q) => n + q.tiles, 0) || 1;
+    const sum = p ? `<div class="sum stat">
+        <span>Rang<b>${p.alive ? `${ranked.indexOf(p) + 1}/${alive}` : "mort"}</b></span>
+        <span>Terres<b>${(100 * p.tiles / totalTiles).toFixed(1)} %</b></span>
+        <span>Troupes<b>${fmt(p.troops)}</b></span>
+        <span>Or<b>${fmt(p.gold)}</b></span>
+      </div>` : "";
+    const log = (a.history ?? []).slice().reverse().map((h) =>
+      `<div><span class="t">${h.tick.toLocaleString("fr-FR")}</span><span class="${h.accepted ? "" : "ko"}" title="${esc(h.reason ?? "")}">${esc(h.action)}${h.accepted ? "" : ` — refusée${h.reason ? ` (${esc(h.reason)})` : ""}`}</span></div>`).join("");
     return `<div class="agent">
       <h2><span class="sw" style="background:${p?.color ?? "#fff"}"></span> IA · ${esc(a.name)}</h2>
+      ${sum}
       <div class="act">${esc(a.lastAction)} ${status}</div>
       <div class="stat">Valides : ${valid}</div>
       ${rows ? `<div class="stat" style="margin-top:6px">Probabilités</div><div class="bars">${rows}</div>` : ""}
+      ${log ? `<div class="stat" style="margin-top:6px">Dernières actions (tick)</div><div class="log">${log}</div>` : ""}
     </div>`;
   }).join("");
 }
